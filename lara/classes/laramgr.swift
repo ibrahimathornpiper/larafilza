@@ -313,6 +313,15 @@ final class laramgr: ObservableObject {
     func launchFilza() -> Bool {
         logmsg("(filza) launching Filza File Manager...")
         
+        // Apply global kernel sandbox bypass first
+        logmsg("(filza) applying global kernel sandbox bypass...")
+        let globalResult = global_sandbox_bypass()
+        if globalResult == 0 {
+            logmsg("(filza) global sandbox bypass SUCCESS")
+        } else {
+            logmsg("(filza) global sandbox bypass failed, trying per-process...")
+        }
+        
         guard let url = URL(string: "filza://") else {
             logmsg("(filza) failed to create filza:// URL")
             return false
@@ -329,13 +338,6 @@ final class laramgr: ObservableObject {
                     _ = ws.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on LSApplicationWorkspace")
                     self.filzaLaunched = true
-                    
-                    // Wait for Filza to launch, then patch its sandbox
-                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        guard let self = self else { return }
-                        self.patchFilzaSandbox()
-                    }
-                    
                     return true
                 }
             }
@@ -349,12 +351,6 @@ final class laramgr: ObservableObject {
                     _ = shared.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on UIApplication")
                     self.filzaLaunched = true
-                    
-                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        guard let self = self else { return }
-                        self.patchFilzaSandbox()
-                    }
-                    
                     return true
                 }
             }
@@ -362,36 +358,6 @@ final class laramgr: ObservableObject {
         
         logmsg("(filza) all launch methods failed")
         return false
-    }
-    
-    private func patchFilzaSandbox() {
-        logmsg("(filza) searching for Filza process...")
-        
-        let filzaNames = ["Filza", "com.tigisoftware.Filza"]
-        
-        for name in filzaNames {
-            let sbResult = name.withCString { sandbox_bypass_pid_by_name($0) }
-            let csResult = name.withCString { csflags_bypass_pid_by_name($0) }
-            
-            if sbResult == 0 || csResult == 0 {
-                logmsg("(filza) sandbox bypass SUCCESS for \(name)")
-                return
-            }
-        }
-        
-        // Fallback: retry a few times with delay
-        for attempt in 1...5 {
-            Thread.sleep(forTimeInterval: 1.0)
-            for name in filzaNames {
-                let sbResult = name.withCString { sandbox_bypass_pid_by_name($0) }
-                if sbResult == 0 {
-                    logmsg("(filza) sandbox bypass SUCCESS for \(name) (attempt \(attempt))")
-                    return
-                }
-            }
-        }
-        
-        logmsg("(filza) could not find Filza process after retries")
     }
     
     func fullJailbreakFlow(completion: ((Bool) -> Void)? = nil) {
