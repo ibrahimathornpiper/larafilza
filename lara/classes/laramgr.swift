@@ -379,19 +379,19 @@ final class laramgr: ObservableObject {
             }
         }
         
-        // Fallback: scan running apps
-        if let apps = NSWorkspace.shared.runningApplications {
-            for app in apps {
-                if app.localizedName?.lowercased().contains("filza") == true {
-                    let pid = app.processIdentifier
-                    logmsg("(filza) found Filza PID \(pid)")
-                    _ = sandbox_bypass_pid(pid)
+        // Fallback: retry a few times with delay
+        for attempt in 1...5 {
+            Thread.sleep(forTimeInterval: 1.0)
+            for name in filzaNames {
+                let sbResult = name.withCString { sandbox_bypass_pid_by_name($0) }
+                if sbResult == 0 {
+                    logmsg("(filza) sandbox bypass SUCCESS for \(name) (attempt \(attempt))")
                     return
                 }
             }
         }
         
-        logmsg("(filza) could not find Filza process")
+        logmsg("(filza) could not find Filza process after retries")
     }
     
     func fullJailbreakFlow(completion: ((Bool) -> Void)? = nil) {
