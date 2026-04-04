@@ -313,19 +313,20 @@ final class laramgr: ObservableObject {
     func launchFilza() -> Bool {
         logmsg("(filza) launching Filza File Manager...")
         
+        guard let url = URL(string: "filza://") else {
+            logmsg("(filza) failed to create filza:// URL")
+            return false
+        }
+        
         // Try LSApplicationWorkspace openURL:
         if let wsClass = NSClassFromString("LSApplicationWorkspace") {
-            if let ws = wsClass.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue()
-                ?? wsClass.perform(NSSelectorFromString("sharedWorkspace"))?.takeUnretainedValue() {
-                
-                guard let url = URL(string: "filza://") else {
-                    logmsg("(filza) failed to create filza:// URL")
-                    return false
-                }
-                
-                let selector = NSSelectorFromString("openURL:")
-                if ws.responds(to: selector) {
-                    _ = ws.perform(selector, with: url)
+            let ws = (wsClass as AnyObject).value(forKey: "defaultWorkspace")
+                ?? (wsClass as AnyObject).value(forKey: "sharedWorkspace")
+            
+            if let ws = ws as? NSObject {
+                let openSel = NSSelectorFromString("openURL:")
+                if ws.responds(to: openSel) {
+                    _ = ws.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on LSApplicationWorkspace")
                     self.filzaLaunched = true
                     return true
@@ -335,11 +336,10 @@ final class laramgr: ObservableObject {
         
         // Fallback: try UIApplication openURL
         if let appClass = NSClassFromString("UIApplication") {
-            if let shared = appClass.perform(NSSelectorFromString("sharedApplication"))?.takeUnretainedValue() {
-                guard let url = URL(string: "filza://") else { return false }
-                let selector = NSSelectorFromString("openURL:options:completionHandler:")
-                if shared.responds(to: selector) {
-                    _ = shared.perform(selector, with: url, with: [:], with: nil)
+            if let shared = (appClass as AnyObject).value(forKey: "sharedApplication") as? NSObject {
+                let openSel = NSSelectorFromString("openURL:options:completionHandler:")
+                if shared.responds(to: openSel) {
+                    _ = shared.perform(openSel, with: url, with: [:], with: nil)
                     logmsg("(filza) openURL:options:completionHandler: called")
                     self.filzaLaunched = true
                     return true
