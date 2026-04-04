@@ -334,13 +334,13 @@ final class laramgr: ObservableObject {
             }
         }
         
-        // Fallback: try UIApplication openURL
+        // Fallback: try UIApplication openURL:
         if let appClass = NSClassFromString("UIApplication") {
             if let shared = (appClass as AnyObject).value(forKey: "sharedApplication") as? NSObject {
-                let openSel = NSSelectorFromString("openURL:options:completionHandler:")
+                let openSel = NSSelectorFromString("openURL:")
                 if shared.responds(to: openSel) {
-                    _ = shared.perform(openSel, with: url, with: [:], with: nil)
-                    logmsg("(filza) openURL:options:completionHandler: called")
+                    _ = shared.perform(openSel, with: url)
+                    logmsg("(filza) openURL: called on UIApplication")
                     self.filzaLaunched = true
                     return true
                 }
