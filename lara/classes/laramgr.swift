@@ -329,6 +329,13 @@ final class laramgr: ObservableObject {
                     _ = ws.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on LSApplicationWorkspace")
                     self.filzaLaunched = true
+                    
+                    // Wait for Filza to launch, then patch its sandbox
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        guard let self = self else { return }
+                        self.patchFilzaSandbox()
+                    }
+                    
                     return true
                 }
             }
@@ -342,6 +349,12 @@ final class laramgr: ObservableObject {
                     _ = shared.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on UIApplication")
                     self.filzaLaunched = true
+                    
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        guard let self = self else { return }
+                        self.patchFilzaSandbox()
+                    }
+                    
                     return true
                 }
             }
@@ -349,6 +362,36 @@ final class laramgr: ObservableObject {
         
         logmsg("(filza) all launch methods failed")
         return false
+    }
+    
+    private func patchFilzaSandbox() {
+        logmsg("(filza) searching for Filza process...")
+        
+        let filzaNames = ["Filza", "com.tigisoftware.Filza"]
+        
+        for name in filzaNames {
+            let sbResult = name.withCString { sandbox_bypass_pid_by_name($0) }
+            let csResult = name.withCString { csflags_bypass_pid_by_name($0) }
+            
+            if sbResult == 0 || csResult == 0 {
+                logmsg("(filza) sandbox bypass SUCCESS for \(name)")
+                return
+            }
+        }
+        
+        // Fallback: scan running apps
+        if let apps = NSWorkspace.shared.runningApplications {
+            for app in apps {
+                if app.localizedName?.lowercased().contains("filza") == true {
+                    let pid = app.processIdentifier
+                    logmsg("(filza) found Filza PID \(pid)")
+                    _ = sandbox_bypass_pid(pid)
+                    return
+                }
+            }
+        }
+        
+        logmsg("(filza) could not find Filza process")
     }
     
     func fullJailbreakFlow(completion: ((Bool) -> Void)? = nil) {
