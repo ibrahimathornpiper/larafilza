@@ -268,4 +268,115 @@ final class laramgr: ObservableObject {
         self.logmsg("(vfs) zeroed first page of \(path)")
         return true
     }
+    
+    // === SANDBOX BYPASS + FILZA LAUNCH ===
+    
+    @Published var sandboxBypassed: Bool = false
+    @Published var filzaLaunched: Bool = false
+    
+    func sandboxBypass(pid: pid_t? = nil) -> Bool {
+        guard dsready else {
+            logmsg("(sandbox) exploit not ready")
+            return false
+        }
+        
+        let targetPid = pid ?? getpid()
+        logmsg("(sandbox) bypassing sandbox for pid \(targetPid)...")
+        
+        // Method 1: Null out p_sandbox
+        let sandboxResult = sandbox_bypass_pid(targetPid)
+        if sandboxResult == 0 {
+            logmsg("(sandbox) p_sandbox bypass SUCCESS")
+        } else {
+            logmsg("(sandbox) p_sandbox bypass failed, trying csflags...")
+        }
+        
+        // Method 2: Patch csflags
+        let csflagsResult = csflags_bypass_pid(targetPid)
+        if csflagsResult == 0 {
+            logmsg("(sandbox) csflags bypass SUCCESS")
+        } else {
+            logmsg("(sandbox) csflags bypass failed")
+        }
+        
+        let success = (sandboxResult == 0 || csflagsResult == 0)
+        if success {
+            self.sandboxBypassed = true
+            logmsg("(sandbox) bypass complete for pid \(targetPid)")
+        } else {
+            logmsg("(sandbox) bypass FAILED")
+        }
+        
+        return success
+    }
+    
+    func launchFilza() -> Bool {
+        logmsg("(filza) launching Filza File Manager...")
+        
+        // Try LSApplicationWorkspace openURL:
+        if let wsClass = NSClassFromString("LSApplicationWorkspace") {
+            if let ws = wsClass.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue()
+                ?? wsClass.perform(NSSelectorFromString("sharedWorkspace"))?.takeUnretainedValue() {
+                
+                guard let url = URL(string: "filza://") else {
+                    logmsg("(filza) failed to create filza:// URL")
+                    return false
+                }
+                
+                let selector = NSSelectorFromString("openURL:")
+                if ws.responds(to: selector) {
+                    _ = ws.perform(selector, with: url)
+                    logmsg("(filza) openURL: called on LSApplicationWorkspace")
+                    self.filzaLaunched = true
+                    return true
+                }
+            }
+        }
+        
+        // Fallback: try UIApplication openURL
+        if let appClass = NSClassFromString("UIApplication") {
+            if let shared = appClass.perform(NSSelectorFromString("sharedApplication"))?.takeUnretainedValue() {
+                guard let url = URL(string: "filza://") else { return false }
+                let selector = NSSelectorFromString("openURL:options:completionHandler:")
+                if shared.responds(to: selector) {
+                    _ = shared.perform(selector, with: url, with: [:], with: nil)
+                    logmsg("(filza) openURL:options:completionHandler: called")
+                    self.filzaLaunched = true
+                    return true
+                }
+            }
+        }
+        
+        logmsg("(filza) all launch methods failed")
+        return false
+    }
+    
+    func fullJailbreakFlow(completion: ((Bool) -> Void)? = nil) {
+        // Step 1: Run exploit
+        run { exploitSuccess in
+            guard exploitSuccess else {
+                completion?(false)
+                return
+            }
+            
+            // Step 2: Init VFS
+            self.vfsinit { vfsSuccess in
+                guard vfsSuccess else {
+                    completion?(false)
+                    return
+                }
+                
+                // Step 3: Sandbox bypass
+                let sandboxOk = self.sandboxBypass()
+                guard sandboxOk else {
+                    completion?(false)
+                    return
+                }
+                
+                // Step 4: Launch Filza
+                let filzaOk = self.launchFilza()
+                completion?(filzaOk)
+            }
+        }
+    }
 }

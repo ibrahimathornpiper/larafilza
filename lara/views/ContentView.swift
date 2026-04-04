@@ -224,6 +224,58 @@ struct ContentView: View {
                             mgr.panic()
                         }
                         .disabled(!mgr.dsready)
+                        
+                        if mgr.dsready {
+                            Button {
+                                mgr.sandboxBypass()
+                            } label: {
+                                if mgr.sandboxBypassed {
+                                    HStack {
+                                        Text("Sandbox Bypassed")
+                                        Spacer()
+                                        Image(systemName: "checkmark.circle")
+                                            .foregroundColor(.green)
+                                    }
+                                } else {
+                                    Text("Bypass Sandbox")
+                                }
+                            }
+                            .disabled(mgr.sandboxBypassed)
+                            
+                            Button {
+                                mgr.launchFilza()
+                            } label: {
+                                if mgr.filzaLaunched {
+                                    HStack {
+                                        Text("Filza Launched")
+                                        Spacer()
+                                        Image(systemName: "checkmark.circle")
+                                            .foregroundColor(.green)
+                                    }
+                                } else {
+                                    HStack {
+                                        Image(systemName: "folder")
+                                        Text("Launch Filza")
+                                    }
+                                }
+                            }
+                            
+                            Button {
+                                mgr.fullJailbreakFlow { success in
+                                    if success {
+                                        mgr.logmsg("Full jailbreak flow complete!")
+                                    } else {
+                                        mgr.logmsg("Full jailbreak flow failed.")
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    Image(systemName: "sparkles")
+                                    Text("Full Jailbreak (Exploit + Sandbox + Filza)")
+                                }
+                            }
+                            .disabled(mgr.dsrunning)
+                        }
                     } header: {
                         Text("Other")
                     }

@@ -9,5 +9,6 @@
 #import "offsets.h"
 #import "utils.h"
 #import "vfs.h"
+#import "sandbox_bypass.h"
 
 void test(NSString *path);
