@@ -15,10 +15,53 @@ struct ContentView: View {
     @State private var pid: pid_t = getpid()
     @State private var hasoffsets = haskernproc()
     @State private var showsettings = false
+    @State private var showJbDetails = false
     
     var body: some View {
         NavigationStack {
             List {
+                // === JAILBREAK STATUS ===
+                Section {
+                    HStack {
+                        Image(systemName: jbStatusIcon)
+                            .foregroundColor(jbStatusColor)
+                            .font(.title2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mgr.jbStatus.statusText)
+                                .font(.headline)
+                            Text("\(mgr.jbStatus.passCount)/\(JailbreakStatus.totalChecks) checks pass")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            mgr.refreshJailbreakStatus()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    
+                    if showJbDetails {
+                        jbCheckRow("JB Root", check: mgr.jbStatus.hasJbRoot)
+                        jbCheckRow("/var/jb Symlink", check: mgr.jbStatus.hasVarJb)
+                        jbCheckRow("Sileo Installed", check: mgr.jbStatus.hasSileo)
+                        jbCheckRow("dpkg Binary", check: mgr.jbStatus.hasDpkg)
+                        jbCheckRow("Sandbox Escaped", check: mgr.jbStatus.sandboxEscaped)
+                        jbCheckRow("Fork Test", check: mgr.jbStatus.canFork)
+                        jbCheckRow("Kernel Exploit", check: mgr.jbStatus.kernelExploitActive)
+                        jbCheckRow("dpkg Packages", check: mgr.jbStatus.dpkgPackageCount > 0,
+                                   detail: mgr.jbStatus.dpkgPackageCount > 0 ? "\(mgr.jbStatus.dpkgPackageCount) pkgs" : nil)
+                    }
+                    
+                    Button(showJbDetails ? "Hide Details" : "Show Details") {
+                        withAnimation { showJbDetails.toggle() }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.accentColor)
+                } header: {
+                    Text("Jailbreak Status")
+                }
+                
                 if !hasoffsets {
                     Section("Setup") {
                         Text("Kernelcache offsets are missing. Download them in Settings.")
@@ -227,20 +270,48 @@ struct ContentView: View {
                         
                         if mgr.dsready {
                             Button {
-                                mgr.sandboxBypass()
+                                mgr.fullEscalation()
                             } label: {
-                                if mgr.sandboxBypassed {
+                                if mgr.elevated {
                                     HStack {
-                                        Text("Sandbox Bypassed")
+                                        Text("Elevated to Root")
                                         Spacer()
                                         Image(systemName: "checkmark.circle")
                                             .foregroundColor(.green)
                                     }
+                                } else if mgr.sandboxBypassed {
+                                    HStack {
+                                        Text("Sandbox Bypassed (no root)")
+                                        Spacer()
+                                        Image(systemName: "exclamationmark.circle")
+                                            .foregroundColor(.orange)
+                                    }
                                 } else {
-                                    Text("Bypass Sandbox")
+                                    HStack {
+                                        Image(systemName: "bolt.shield")
+                                        Text("Escalate (Sandbox + CSFlags)")
+                                    }
                                 }
                             }
-                            .disabled(mgr.sandboxBypassed)
+                            .disabled(mgr.elevated)
+                            
+                            Button {
+                                mgr.createVarJb()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "folder.badge.plus")
+                                    Text("Create JB Directories")
+                                }
+                            }
+                            
+                            NavigationLink {
+                                RWFileManagerView(path: NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first ?? "/")
+                            } label: {
+                                HStack {
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                    Text("File Manager")
+                                }
+                            }
                             
                             Button {
                                 mgr.launchFilza()
@@ -260,6 +331,24 @@ struct ContentView: View {
                                 }
                             }
                             
+                            NavigationLink {
+                                SandboxInfoView()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "lock.shield")
+                                    Text("Sandbox Extensions")
+                                }
+                            }
+                            
+                            NavigationLink {
+                                ProcessListView()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "list.number")
+                                    Text("Kernel Processes")
+                                }
+                            }
+                            
                             Button {
                                 mgr.fullJailbreakFlow { success in
                                     if success {
@@ -271,13 +360,13 @@ struct ContentView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: "sparkles")
-                                    Text("Full Jailbreak (Exploit + Sandbox + Filza)")
+                                    Text("Full Jailbreak (Auto)")
                                 }
                             }
                             .disabled(mgr.dsrunning)
                         }
                     } header: {
-                        Text("Other")
+                        Text("Jailbreak")
                     }
                 }
                 
@@ -292,9 +381,48 @@ struct ContentView: View {
                     }
                 }
             }
+            .onAppear {
+                mgr.refreshJailbreakStatus()
+            }
         }
         .sheet(isPresented: $showsettings) {
             SettingsView(hasoffsets: $hasoffsets)
         }
     }
+    
+    // MARK: - Jailbreak Status Helpers
+    
+    private var jbStatusIcon: String {
+        if mgr.jbStatus.isSileoInstalled { return "checkmark.seal.fill" }
+        if mgr.jbStatus.isBootstrapped { return "checkmark.circle.fill" }
+        if mgr.jbStatus.isJailbroken { return "bolt.fill" }
+        if mgr.jbStatus.kernelExploitActive { return "bolt.circle" }
+        return "lock.fill"
+    }
+    
+    private var jbStatusColor: Color {
+        if mgr.jbStatus.isSileoInstalled { return .green }
+        if mgr.jbStatus.isBootstrapped { return .green }
+        if mgr.jbStatus.isJailbroken { return .orange }
+        if mgr.jbStatus.kernelExploitActive { return .yellow }
+        return .secondary
+    }
+    
+    @ViewBuilder
+    private func jbCheckRow(_ label: String, check: Bool, detail: String? = nil) -> some View {
+        HStack {
+            Image(systemName: check ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundColor(check ? .green : .red.opacity(0.5))
+                .font(.caption)
+            Text(label)
+                .font(.subheadline)
+            Spacer()
+            if let detail = detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
 }
+

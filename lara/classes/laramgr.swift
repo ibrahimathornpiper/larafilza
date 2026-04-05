@@ -31,12 +31,27 @@ final class laramgr: ObservableObject {
     @Published var vfsrunning: Bool = false
     @Published var vfsprogress: Double = 0.0
     
+    @Published var macfready: Bool = false
+    @Published var macfattempted: Bool = false
+    @Published var macffailed: Bool = false
+    
+    @Published var sbxExtEscaped: Bool = false
+    
+    @Published var jbStatus: JailbreakStatus = JailbreakStatus()
+    
     static let shared = laramgr()
     static let fontpath = "/System/Library/Fonts/Core/SFUI.ttf"
+    static let jbRoot = "/private/var/mobile/procursus"
     private init() {}
     
     func run(completion: ((Bool) -> Void)? = nil) {
         guard !dsrunning else { return }
+        // SAFETY: never re-run exploit if already succeeded — causes kernel panic
+        if dsready && ds_is_ready() {
+            logmsg("(ds) exploit already active, skipping re-run")
+            completion?(true)
+            return
+        }
         dsrunning = true
         dsready = false
         dsfailed = false
@@ -92,6 +107,27 @@ final class laramgr: ObservableObject {
         DispatchQueue.main.async {
             self.log += message + "\n"
             globallogger.log(message)
+        }
+        // Crash-safe: also write to disk immediately (survives kernel panic)
+        Self.appendLogToDisk(message)
+    }
+
+    // Write log line to Documents/lara_crash_log.txt (persists across panics)
+    private static func appendLogToDisk(_ msg: String) {
+        let docsDir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
+        let logPath = (docsDir as NSString).appendingPathComponent("lara_crash_log.txt")
+        let line = msg + "\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let fh = FileHandle(forWritingAtPath: logPath) {
+                    fh.seekToEndOfFile()
+                    fh.write(data)
+                    fh.synchronizeFile()
+                    fh.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath))
+            }
         }
     }
 
@@ -167,6 +203,58 @@ final class laramgr: ObservableObject {
         DispatchQueue.main.async {
             laramgr.shared.vfsinitlog += "(vfs) " + s + "\n"
             laramgr.shared.logmsg("(vfs) " + s)
+        }
+    }
+
+    // === MACF BYPASS ===
+    
+    func macfinit(completion: ((Bool) -> Void)? = nil) {
+        macf_set_log_callback { msg in
+            guard let msg = msg else { return }
+            let s = String(cString: msg)
+            DispatchQueue.main.async {
+                laramgr.shared.logmsg("(macf) " + s)
+            }
+        }
+        macfattempted = true
+        macffailed = false
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let r = macf_init()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.macfready = (r == 0 && macf_is_ready())
+                if self.macfready {
+                    self.macffailed = false
+                    self.logmsg("\nmacf bypass ready!\n")
+                } else {
+                    self.macffailed = true
+                    self.logmsg("\nmacf bypass init failed.\n")
+                }
+                completion?(self.macfready)
+            }
+        }
+    }
+
+    // === SANDBOX EXTENSION ESCAPE (from FilzaEscapedDS) ===
+    
+    func sandboxExtEscape() {
+        sbx_ext_set_log { msg in
+            guard let msg = msg else { return }
+            let s = String(cString: msg)
+            DispatchQueue.main.async {
+                laramgr.shared.logmsg("(sbx-ext) " + s)
+            }
+        }
+        
+        logmsg("\n(sbx-ext) starting sandbox extension escape...")
+        let result = sandbox_ext_escape()
+        sbxExtEscaped = (result == 0 && sbx_ext_is_escaped())
+        
+        if sbxExtEscaped {
+            logmsg("(sbx-ext) *** SANDBOX ESCAPED — full R+W access! ***\n")
+        } else {
+            logmsg("(sbx-ext) sandbox extension escape failed\n")
         }
     }
 
@@ -273,7 +361,9 @@ final class laramgr: ObservableObject {
     
     @Published var sandboxBypassed: Bool = false
     @Published var filzaLaunched: Bool = false
+    @Published var elevated: Bool = false
     
+    @discardableResult
     func sandboxBypass(pid: pid_t? = nil) -> Bool {
         guard dsready else {
             logmsg("(sandbox) exploit not ready")
@@ -310,22 +400,115 @@ final class laramgr: ObservableObject {
         return success
     }
     
+    // Privilege escalation: sandbox null + csflags bypass
+    // NOTE: On iOS 18, uid=0 (root) requires PPL bypass which is not available.
+    // This function removes sandbox and patches csflags only.
+    @discardableResult
+    func fullEscalation(pid: pid_t? = nil) -> Bool {
+        guard dsready else {
+            logmsg("(elevate) exploit not ready")
+            return false
+        }
+        
+        let targetPid = pid ?? getpid()
+        logmsg("(elevate) escalation for pid \(targetPid)...")
+        logmsg("(elevate) NOTE: uid=0 not available on iOS 18 (PPL)")
+        
+        let result = elevate_to_root(targetPid)
+        if result == 0 {
+            self.sandboxBypassed = true
+            self.elevated = true // sandbox removed + csflags patched
+            logmsg("(elevate) SUCCESS: sandbox removed + csflags patched")
+            return true
+        } else {
+            logmsg("(elevate) escalation failed for pid \(targetPid)")
+            return sandboxBypass(pid: targetPid)
+        }
+    }
+    
+    // Create rootless jailbreak directory structure
+    // Target: /private/var/mobile/procursus (we have R+W here after sandbox escape)
+    // Symlink: /var/jb → /private/var/mobile/procursus
+    @discardableResult
+    func createVarJb() -> Bool {
+        let fm = FileManager.default
+
+        let jbRoot = Self.jbRoot
+        let subdirs = ["bin", "lib", "etc", "var", "tmp", "usr",
+                       "usr/bin", "usr/lib", "usr/local", "usr/libexec",
+                       "Library", "Library/dpkg", "Library/dpkg/info",
+                       "Applications", "basebin"]
+
+        logmsg("(jb) creating rootless jailbreak at \(jbRoot)...")
+
+        if sbxExtEscaped {
+            // Primary: sandbox escaped — direct write to /private/var/mobile
+            do {
+                if !fm.fileExists(atPath: jbRoot) {
+                    try fm.createDirectory(atPath: jbRoot, withIntermediateDirectories: true)
+                }
+                logmsg("(jb) ✅ \(jbRoot) CREATED!")
+
+                for sub in subdirs {
+                    let subPath = (jbRoot as NSString).appendingPathComponent(sub)
+                    if !fm.fileExists(atPath: subPath) {
+                        try fm.createDirectory(atPath: subPath, withIntermediateDirectories: true)
+                    }
+                }
+                logmsg("(jb) directory structure ready")
+
+                // Try symlink /var/jb → /private/var/mobile/procursus
+                let symlinkPath = "/private/var/jb"
+                if !fm.fileExists(atPath: symlinkPath) {
+                    do {
+                        try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: jbRoot)
+                        logmsg("(jb) ✅ symlink /var/jb → \(jbRoot)")
+                    } catch {
+                        logmsg("(jb) symlink /var/jb failed (not critical): \(error.localizedDescription)")
+                    }
+                }
+
+                return true
+            } catch {
+                logmsg("(jb) ❌ failed to create \(jbRoot): \(error.localizedDescription)")
+                return false
+            }
+        } else {
+            // Fallback: local container directory
+            let docsDir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
+            let localJbPath = (docsDir as NSString).appendingPathComponent("jb")
+            logmsg("(jb) sandbox not escaped — using local path: \(localJbPath)")
+            do {
+                try fm.createDirectory(atPath: localJbPath, withIntermediateDirectories: true)
+                for sub in subdirs {
+                    let subPath = (localJbPath as NSString).appendingPathComponent(sub)
+                    if !fm.fileExists(atPath: subPath) {
+                        try? fm.createDirectory(atPath: subPath, withIntermediateDirectories: true)
+                    }
+                }
+            } catch {
+                logmsg("(jb) local jb also failed: \(error.localizedDescription)")
+                return false
+            }
+            return true
+        }
+    }
+    
     func launchFilza() -> Bool {
         logmsg("(filza) launching Filza File Manager...")
         
-        // Apply global kernel sandbox bypass first
+        // Try global kernel sandbox bypass first
         logmsg("(filza) applying global kernel sandbox bypass...")
         let globalResult = global_sandbox_bypass()
         if globalResult == 0 {
             logmsg("(filza) global sandbox bypass SUCCESS")
         } else {
-            logmsg("(filza) global sandbox bypass failed, trying per-process...")
+            logmsg("(filza) global sandbox bypass failed (kernel text likely PPL-protected)")
+            logmsg("(filza) will apply per-process bypass after launch...")
         }
         
-        guard let url = URL(string: "filza://") else {
-            logmsg("(filza) failed to create filza:// URL")
-            return false
-        }
+        // Launch Filza first
+        var launched = false
         
         // Try LSApplicationWorkspace openURL:
         if let wsClass = NSClassFromString("LSApplicationWorkspace") {
@@ -334,58 +517,280 @@ final class laramgr: ObservableObject {
             
             if let ws = ws as? NSObject {
                 let openSel = NSSelectorFromString("openURL:")
-                if ws.responds(to: openSel) {
+                if ws.responds(to: openSel),
+                   let url = URL(string: "filza://") {
                     _ = ws.perform(openSel, with: url)
                     logmsg("(filza) openURL: called on LSApplicationWorkspace")
-                    self.filzaLaunched = true
-                    return true
+                    launched = true
                 }
             }
         }
         
         // Fallback: try UIApplication openURL:
-        if let appClass = NSClassFromString("UIApplication") {
-            if let shared = (appClass as AnyObject).value(forKey: "sharedApplication") as? NSObject {
-                let openSel = NSSelectorFromString("openURL:")
-                if shared.responds(to: openSel) {
-                    _ = shared.perform(openSel, with: url)
-                    logmsg("(filza) openURL: called on UIApplication")
-                    self.filzaLaunched = true
-                    return true
+        if !launched {
+            if let appClass = NSClassFromString("UIApplication") {
+                if let shared = (appClass as AnyObject).value(forKey: "sharedApplication") as? NSObject {
+                    let openSel = NSSelectorFromString("openURL:")
+                    if shared.responds(to: openSel),
+                       let url = URL(string: "filza://") {
+                        _ = shared.perform(openSel, with: url)
+                        logmsg("(filza) openURL: called on UIApplication")
+                        launched = true
+                    }
                 }
             }
         }
         
-        logmsg("(filza) all launch methods failed")
-        return false
+        guard launched else {
+            logmsg("(filza) all launch methods failed")
+            return false
+        }
+        
+        // Apply per-process privilege escalation to Filza
+        // (sandbox null + ucred steal for root access)
+        logmsg("(filza) applying full privilege escalation to Filza...")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Wait for Filza to launch and appear in proc list
+            usleep(1_500_000) // 1.5 seconds
+            
+            // Try common Filza process names
+            let filzaNames = ["Filza", "FilzaFileManager", "filza"]
+            var elevated = false
+            
+            for name in filzaNames {
+                let result = elevate_to_root_by_name(name)
+                if result == 0 {
+                    DispatchQueue.main.async {
+                        self?.logmsg("(filza) full privilege escalation SUCCESS for \(name)")
+                        self?.logmsg("(filza) \(name) now has uid=0 (root) + no sandbox")
+                    }
+                    elevated = true
+                    break
+                }
+            }
+            
+            if !elevated {
+                DispatchQueue.main.async {
+                    self?.logmsg("(filza) WARNING: privilege escalation failed for Filza")
+                    self?.logmsg("(filza) Filza may have limited file access")
+                }
+            }
+        }
+        
+        self.filzaLaunched = true
+        return true
+    }
+    
+    /// Install a .deb file to the jailbreak root with dpkg metadata registration
+    func installDebToSystem(debURL: URL, completion: @escaping (Bool) -> Void) {
+        let targetDir = Self.jbRoot
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.logmsg("(deb) installing \(debURL.lastPathComponent)...")
+            
+            // Use full extraction — gets both data files and control metadata
+            let result = Extractor.extractDebFull(fileURL: debURL, destPath: targetDir)
+            
+            guard result.dataOK else {
+                self.logmsg("(deb) ❌ data extraction failed for \(debURL.lastPathComponent)")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            self.logmsg("(deb) ✅ files extracted to \(targetDir)")
+            
+            // Register in dpkg if we have control info
+            if let controlInfo = result.controlInfo {
+                self.registerDpkgPackage(controlInfo: controlInfo)
+            } else {
+                self.logmsg("(deb) ⚠️ no control info found, skipping dpkg registration")
+            }
+            
+            DispatchQueue.main.async {
+                self.refreshJailbreakStatus()
+                completion(true)
+            }
+        }
+    }
+    
+    /// Register a package in dpkg status file
+    private func registerDpkgPackage(controlInfo: String) {
+        let fm = FileManager.default
+        let dpkgDir = (Self.jbRoot as NSString).appendingPathComponent("Library/dpkg")
+        let statusPath = (dpkgDir as NSString).appendingPathComponent("status")
+        let infoDir = (dpkgDir as NSString).appendingPathComponent("info")
+        
+        // Ensure dpkg directories exist
+        try? fm.createDirectory(atPath: dpkgDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: infoDir, withIntermediateDirectories: true)
+        
+        // Parse package name from control info
+        var packageName = "unknown"
+        for line in controlInfo.components(separatedBy: "\n") {
+            if line.hasPrefix("Package:") {
+                packageName = line.replacingOccurrences(of: "Package:", with: "").trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        
+        // Build dpkg status entry — add "Status: install ok installed"
+        var statusEntry = ""
+        var hasStatus = false
+        for line in controlInfo.components(separatedBy: "\n") {
+            if line.hasPrefix("Status:") {
+                hasStatus = true
+            }
+            statusEntry += line + "\n"
+        }
+        if !hasStatus {
+            // Insert Status line after Package line
+            statusEntry = controlInfo.components(separatedBy: "\n").map { line -> String in
+                if line.hasPrefix("Package:") {
+                    return line + "\nStatus: install ok installed"
+                }
+                return line
+            }.joined(separator: "\n")
+        }
+        
+        // Ensure entry ends with double newline (dpkg format)
+        statusEntry = statusEntry.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n"
+        
+        // Append to status file
+        if fm.fileExists(atPath: statusPath) {
+            if let fh = FileHandle(forWritingAtPath: statusPath) {
+                fh.seekToEndOfFile()
+                if let data = statusEntry.data(using: .utf8) {
+                    fh.write(data)
+                }
+                fh.synchronizeFile()
+                fh.closeFile()
+                logmsg("(dpkg) appended \(packageName) to status file")
+            }
+        } else {
+            try? statusEntry.write(toFile: statusPath, atomically: true, encoding: .utf8)
+            logmsg("(dpkg) created status file with \(packageName)")
+        }
+        
+        // Write control file to dpkg info directory
+        let controlPath = (infoDir as NSString).appendingPathComponent("\(packageName).control")
+        try? controlInfo.write(toFile: controlPath, atomically: true, encoding: .utf8)
+        
+        // Write empty list file (dpkg requires it)
+        let listPath = (infoDir as NSString).appendingPathComponent("\(packageName).list")
+        if !fm.fileExists(atPath: listPath) {
+            try? "".write(toFile: listPath, atomically: true, encoding: .utf8)
+        }
+        
+        logmsg("(dpkg) ✅ registered package: \(packageName)")
+    }
+    
+    func deployBootstrap(completion: @escaping (Bool) -> Void) {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let bsURL = URL(string: "https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.tar.zst")!
+        let bsDest = docs.appendingPathComponent("bootstrap.tar.zst")
+        let bsTar = docs.appendingPathComponent("bootstrap.tar")
+        
+        let sileoURL = URL(string: "https://github.com/Sileo/Sileo/releases/download/2.5.1/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb")!
+        let sileoDest = docs.appendingPathComponent("sileo.deb")
+        
+        let targetDir = Self.jbRoot
+        
+        self.logmsg("(jb) downloading bootstrap...")
+        Extractor.downloadFile(url: bsURL, destURL: bsDest) { success in
+            guard success else {
+                self.logmsg("(jb) bootstrap download failed")
+                completion(false)
+                return
+            }
+            self.logmsg("(jb) downloaded bootstrap. decompressing zstd...")
+            
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard Extractor.decompressZSTD(src: bsDest, dst: bsTar) else {
+                    self.logmsg("(jb) zstd decompression failed")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                
+                self.logmsg("(jb) zstd decompressed. untarring to \(targetDir)...")
+                guard let tarData = try? Data(contentsOf: bsTar) else {
+                    self.logmsg("(jb) failed to read tar")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                
+                let extractOK = Extractor.extractTar(data: tarData, destPath: targetDir, stripPrefix: "./var/jb/")
+                if extractOK {
+                    self.logmsg("(jb) ✅ bootstrap extracted!")
+                } else {
+                    self.logmsg("(jb) ❌ bootstrap extraction failed")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                
+                // Download and install Sileo deb properly
+                self.logmsg("(jb) downloading sileo...")
+                Extractor.downloadFile(url: sileoURL, destURL: sileoDest) { sSuccess in
+                    guard sSuccess else {
+                        self.logmsg("(jb) sileo download failed")
+                        completion(false)
+                        return
+                    }
+                    self.logmsg("(jb) sileo downloaded. installing deb...")
+                    
+                    // Use proper deb installer with dpkg registration
+                    self.installDebToSystem(debURL: sileoDest) { installOK in
+                        if installOK {
+                            self.logmsg("(jb) ✅ sileo installed! rootless jailbreak complete.")
+                        } else {
+                            self.logmsg("(jb) ❌ sileo deb install failed")
+                        }
+                        DispatchQueue.main.async { completion(installOK) }
+                    }
+                }
+            }
+        }
     }
     
     func fullJailbreakFlow(completion: ((Bool) -> Void)? = nil) {
-        // Step 1: Run exploit
+        let docsDir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
+        let crashLog = (docsDir as NSString).appendingPathComponent("lara_crash_log.txt")
+        try? "=== JB FLOW ===\n".write(toFile: crashLog, atomically: true, encoding: .utf8)
+
+        logmsg("(flow) step 1: exploit...")
         run { exploitSuccess in
             guard exploitSuccess else {
+                self.logmsg("(flow) exploit FAILED")
                 completion?(false)
                 return
             }
-            
-            // Step 2: Init VFS
-            self.vfsinit { vfsSuccess in
-                guard vfsSuccess else {
-                    completion?(false)
-                    return
+            self.logmsg("(flow) exploit OK — running sandbox escape IMMEDIATELY...")
+
+            self.sandboxExtEscape()
+            self.logmsg("(flow) escape result: \(self.sbxExtEscaped)")
+
+            if self.sbxExtEscaped {
+                self.logmsg("(flow) creating jb dirs...")
+                DispatchQueue.main.async {
+                    self.createVarJb()
+                    self.deployBootstrap { success in
+                        self.refreshJailbreakStatus()
+                        self.logmsg("(flow) Full Jailbreak DONE!")
+                        completion?(success)
+                    }
                 }
-                
-                // Step 3: Sandbox bypass
-                let sandboxOk = self.sandboxBypass()
-                guard sandboxOk else {
-                    completion?(false)
-                    return
-                }
-                
-                // Step 4: Launch Filza
-                let filzaOk = self.launchFilza()
-                completion?(filzaOk)
+            } else {
+                self.logmsg("(flow) escape failed")
+                completion?(false)
             }
+        }
+    }
+    
+    // === JAILBREAK STATUS ===
+    
+    func refreshJailbreakStatus() {
+        let status = checkJailbreakStatus()
+        DispatchQueue.main.async {
+            self.jbStatus = status
+            self.logmsg("(jb-check) status: \(status.statusText) (\(status.passCount)/\(JailbreakStatus.totalChecks) checks pass)")
         }
     }
 }

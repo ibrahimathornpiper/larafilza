@@ -1,6 +1,15 @@
 {
-  "originHash" : "b26c070fd1f0b029780331f3cefa3909a6d58ea6b3ae242bffe49d6011fe06fe",
+  "originHash" : "29c90036258e99082d850b8e923f52abb876254ccf8332ed22eb33e2580b8e58",
   "pins" : [
+    {
+      "identity" : "swiftzstd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/aperedera/SwiftZSTD",
+      "state" : {
+        "branch" : "master",
+        "revision" : "1c9fdce21e3552ba6aa867cbcd1a4c2e29563cf3"
+      }
+    },
     {
       "identity" : "zipfoundation",
       "kind" : "remoteSourceControl",

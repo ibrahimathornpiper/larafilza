@@ -12,6 +12,7 @@
 		9F4A1D403C4E567890123456 /* lara/lib/libgrabkernel2.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F4A1D413C4E567890123456 /* lara/lib/libgrabkernel2.dylib */; };
 		9F4A1D423C4E567890123456 /* lara/lib/libgrabkernel2.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9F4A1D413C4E567890123456 /* lara/lib/libgrabkernel2.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		CC70C4AF2F79BCEE0052726B /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = CC70C4AE2F79BCEE0052726B /* ZIPFoundation */; };
+		DF653D0D2F81EE9E00AC9B3D /* SwiftZSTD in Frameworks */ = {isa = PBXBuildFile; productRef = DF653D0C2F81EE9E00AC9B3D /* SwiftZSTD */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -66,6 +67,7 @@
 				9F4A1D2D3C4E567890123456 /* lara/lib/libxpf.dylib in Frameworks */,
 				9F4A1D403C4E567890123456 /* lara/lib/libgrabkernel2.dylib in Frameworks */,
 				CC70C4AF2F79BCEE0052726B /* ZIPFoundation in Frameworks */,
+				DF653D0D2F81EE9E00AC9B3D /* SwiftZSTD in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +123,7 @@
 			name = lara;
 			packageProductDependencies = (
 				CC70C4AE2F79BCEE0052726B /* ZIPFoundation */,
+				DF653D0C2F81EE9E00AC9B3D /* SwiftZSTD */,
 			);
 			productName = lara;
 			productReference = CC1C8B392F71DF9C00206982 /* lara.app */;
@@ -152,6 +155,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CC70C4AD2F79BCEE0052726B /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				DF653D0B2F81EE9E00AC9B3D /* XCRemoteSwiftPackageReference "SwiftZSTD" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC1C8B3A2F71DF9C00206982 /* Products */;
@@ -312,9 +316,10 @@
 			buildSettings = {
 				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = lara;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = DN4S6CXFWY;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -359,9 +364,10 @@
 			buildSettings = {
 				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = lara;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = DN4S6CXFWY;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -433,6 +439,14 @@
 				minimumVersion = 0.9.20;
 			};
 		};
+		DF653D0B2F81EE9E00AC9B3D /* XCRemoteSwiftPackageReference "SwiftZSTD" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/aperedera/SwiftZSTD";
+			requirement = {
+				branch = master;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -440,6 +454,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CC70C4AD2F79BCEE0052726B /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
 			productName = ZIPFoundation;
+		};
+		DF653D0C2F81EE9E00AC9B3D /* SwiftZSTD */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DF653D0B2F81EE9E00AC9B3D /* XCRemoteSwiftPackageReference "SwiftZSTD" */;
+			productName = SwiftZSTD;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

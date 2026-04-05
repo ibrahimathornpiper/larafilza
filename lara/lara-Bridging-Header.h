@@ -10,5 +10,8 @@
 #import "utils.h"
 #import "vfs.h"
 #import "sandbox_bypass.h"
+#import "sandbox_info.h"
+#import "macf_bypass.h"
+#import "sandbox_ext_escape.h"
 
 void test(NSString *path);

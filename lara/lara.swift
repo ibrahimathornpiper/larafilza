@@ -67,6 +67,7 @@ struct lara: App {
                 }
                 
                 init_offsets()
+                mgr.refreshJailbreakStatus()
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .background {
