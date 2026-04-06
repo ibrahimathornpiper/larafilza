@@ -783,8 +783,23 @@ final class laramgr: ObservableObject {
                         if installOK {
                             self.logmsg("(jb) ✅ sileo installed!")
                             
-                            // Register Sileo with SpringBoard so it appears on home screen
+                            // Symlink Sileo.app to /Applications/ so SpringBoard scans it
                             let sileoBundlePath = (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app")
+                            let symlinkPath = "/Applications/Sileo.app"
+                            let fm = FileManager.default
+                            
+                            if fm.fileExists(atPath: symlinkPath) {
+                                try? fm.removeItem(atPath: symlinkPath)
+                            }
+                            
+                            do {
+                                try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: sileoBundlePath)
+                                self.logmsg("(uicache) ✅ symlinked Sileo.app -> /Applications/")
+                            } catch {
+                                self.logmsg("(uicache) ⚠️ symlink failed: \(error)")
+                            }
+                            
+                            // Register Sileo with SpringBoard
                             self.registerAppWithSpringBoard(bundlePath: sileoBundlePath)
                             
                             // Scan and register ALL apps in the jailbreak Applications directory
