@@ -92,12 +92,21 @@ func checkJailbreakStatus() -> JailbreakStatus {
     var isDir: ObjCBool = false
     status.hasJbRoot = fm.fileExists(atPath: jbRoot, isDirectory: &isDir) && isDir.boolValue
     
-    // 2. Check /var/jb symlink
+    // 2. Check /var/jb — symlink OR vnode redirect
     let varJb = "/private/var/jb"
     if let dest = try? fm.destinationOfSymbolicLink(atPath: varJb) {
         status.hasVarJb = fm.fileExists(atPath: dest)
+    } else if fm.fileExists(atPath: varJb) {
+        // Vnode redirect makes /var/jb a real directory (not a symlink)
+        // Verify by checking if we can read a known file inside
+        let testPaths = [
+            "\(varJb)/usr",
+            "\(varJb)/bin",
+            "\(varJb)/Library"
+        ]
+        status.hasVarJb = testPaths.contains { fm.fileExists(atPath: $0) }
     } else {
-        status.hasVarJb = fm.fileExists(atPath: varJb)
+        status.hasVarJb = false
     }
     
     // 3. Check Sileo.app
@@ -125,15 +134,17 @@ func checkJailbreakStatus() -> JailbreakStatus {
         status.sandboxEscaped = true
     }
     
-    // 6. Process spawn check — sandboxed apps cannot spawn processes
+    // 6. Process spawn check — use procursus shell (system /bin/sh may be on read-only rootfs)
+    let jbShell = "\(jbRoot)/bin/sh"
+    let shellPath = fm.fileExists(atPath: jbShell) ? jbShell : "/bin/sh"
     var spawnPid: pid_t = 0
     let argv: [UnsafeMutablePointer<CChar>?] = [
-        strdup("/bin/sh"),
+        strdup(shellPath),
         strdup("-c"),
         strdup("true"),
         nil
     ]
-    let spawnResult = posix_spawn(&spawnPid, "/bin/sh", nil, nil, argv, nil)
+    let spawnResult = posix_spawn(&spawnPid, shellPath, nil, nil, argv, nil)
     argv.forEach { free($0) }
     if spawnResult == 0 && spawnPid > 0 {
         var exitStatus: Int32 = 0

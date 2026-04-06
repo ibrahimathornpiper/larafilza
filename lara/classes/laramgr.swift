@@ -459,15 +459,32 @@ final class laramgr: ObservableObject {
                 }
                 logmsg("(jb) directory structure ready")
 
-                // Try symlink /var/jb → /private/var/mobile/procursus
-                let symlinkPath = "/private/var/jb"
-                if !fm.fileExists(atPath: symlinkPath) {
+                // Create /var/jb directory (needed so the vnode exists for redirect)
+                let varJbPath = "/private/var/jb"
+                if !fm.fileExists(atPath: varJbPath) {
                     do {
-                        try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: jbRoot)
-                        logmsg("(jb) ✅ symlink /var/jb → \(jbRoot)")
+                        try fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
+                        logmsg("(jb) created /var/jb directory for vnode redirect")
                     } catch {
-                        logmsg("(jb) symlink /var/jb failed (not critical): \(error.localizedDescription)")
+                        logmsg("(jb) mkdir /var/jb failed: \(error.localizedDescription)")
                     }
+                }
+                
+                // Kernel-level vnode redirect: /var/jb → procursus root
+                // This swaps the v_data pointer so any access to /var/jb
+                // transparently reads from /private/var/mobile/procursus
+                if vfs_isready() {
+                    let result = vfs_vnode_redirect_folder("/private/var/jb", jbRoot)
+                    if result != 0 {
+                        logmsg("(jb) ✅ vnode redirect /var/jb → \(jbRoot) (orig_v_data=0x\(String(result, radix: 16)))")
+                    } else {
+                        logmsg("(jb) ⚠️ vnode redirect failed — /var/jb won't work as alias")
+                        // Fallback: try symlink anyway
+                        try? fm.createSymbolicLink(atPath: varJbPath, withDestinationPath: jbRoot)
+                    }
+                } else {
+                    logmsg("(jb) vfs not ready — trying symlink fallback")
+                    try? fm.createSymbolicLink(atPath: varJbPath, withDestinationPath: jbRoot)
                 }
 
                 return true
@@ -719,9 +736,25 @@ final class laramgr: ObservableObject {
                     return
                 }
                 
-                let extractOK = Extractor.extractTar(data: tarData, destPath: targetDir, stripPrefix: "./var/jb/")
+                let extractOK = Extractor.extractTar(data: tarData, destPath: targetDir, stripPrefix: "./")
                 if extractOK {
                     self.logmsg("(jb) ✅ bootstrap extracted!")
+                    
+                    // Run prep_bootstrap.sh if it exists
+                    let prepScript = (targetDir as NSString).appendingPathComponent("prep_bootstrap.sh")
+                    let jbSh = (targetDir as NSString).appendingPathComponent("bin/sh")
+                    if FileManager.default.fileExists(atPath: prepScript) {
+                        // Make script executable
+                        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: prepScript)
+                        if FileManager.default.fileExists(atPath: jbSh) {
+                            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jbSh)
+                            self.logmsg("(jb) running prep_bootstrap.sh...")
+                            let ret = self.spawnBinary(jbSh, args: [prepScript])
+                            self.logmsg("(jb) prep_bootstrap.sh exited with code \(ret)")
+                        } else {
+                            self.logmsg("(jb) ⚠️ bin/sh not found at \(jbSh) — skipping prep_bootstrap.sh")
+                        }
+                    }
                 } else {
                     self.logmsg("(jb) ❌ bootstrap extraction failed")
                     DispatchQueue.main.async { completion(false) }
