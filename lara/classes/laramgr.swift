@@ -878,19 +878,20 @@ final class laramgr: ObservableObject {
             return
         }
         
-        // LSApplicationWorkspace.defaultWorkspace.registerApplicationDictionary:
-        guard let lsClass = NSClassFromString("LSApplicationWorkspace") else {
+        // LSApplicationWorkspace.defaultWorkspace
+        guard let lsClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
             logmsg("(uicache) ❌ LSApplicationWorkspace not available")
             return
         }
         
-        let workspace = lsClass.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue()
-        guard let ws = workspace else {
+        let dwSel = NSSelectorFromString("defaultWorkspace")
+        guard lsClass.responds(to: dwSel),
+              let wsObj = lsClass.perform(dwSel)?.takeUnretainedValue() as? NSObject else {
             logmsg("(uicache) ❌ couldn't get defaultWorkspace")
             return
         }
         
-        let appDict: [String: Any] = [
+        let appDict: NSDictionary = [
             "ApplicationType": "System",
             "CFBundleIdentifier": bundleID,
             "Path": bundlePath,
@@ -898,17 +899,16 @@ final class laramgr: ObservableObject {
             "IsDeletable": false
         ]
         
-        let sel = NSSelectorFromString("registerApplicationDictionary:")
-        if ws.responds(to: sel) {
-            _ = ws.perform(sel, with: appDict)
+        let regSel = NSSelectorFromString("registerApplicationDictionary:")
+        if wsObj.responds(to: regSel) {
+            _ = wsObj.perform(regSel, with: appDict)
             logmsg("(uicache) ✅ registered \(bundleID) via LSApplicationWorkspace")
         } else {
-            // Fallback: installApplication:withOptions:error:
-            let installSel = NSSelectorFromString("installApplication:withOptions:error:")
-            if ws.responds(to: installSel) {
-                let options: [String: Any] = ["CFBundleIdentifier": bundleID]
-                _ = ws.perform(NSSelectorFromString("installApplication:withOptions:"), with: bundleURL, with: options)
-                logmsg("(uicache) ✅ installed \(bundleID) via LSApplicationWorkspace.installApplication")
+            let installSel = NSSelectorFromString("installApplication:withOptions:")
+            if wsObj.responds(to: installSel) {
+                let options: NSDictionary = ["CFBundleIdentifier": bundleID]
+                _ = wsObj.perform(installSel, with: bundleURL, with: options)
+                logmsg("(uicache) ✅ installed \(bundleID) via installApplication")
             } else {
                 logmsg("(uicache) ❌ no registration method found")
             }
