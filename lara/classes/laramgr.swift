@@ -166,6 +166,32 @@ final class laramgr: ObservableObject {
     
     func respring() {
         notify_post("com.apple.springboard.toggleLockScreen")
+        
+        // Invalidate icon cache
+        let cacheDir = "/var/mobile/Library/Caches/com.apple.springboard.csstore"
+        let fm = FileManager.default
+        if fm.fileExists(atPath: cacheDir) {
+            try? fm.removeItem(atPath: cacheDir)
+        }
+        
+        let altCache = "/var/mobile/Library/Caches/com.apple.SpringBoard"
+        if fm.fileExists(atPath: altCache) {
+            try? fm.removeItem(atPath: altCache)
+        }
+        
+        // Post refresh notifications
+        notify_post("com.apple.springboard.needsRefresh")
+        notify_post("com.apple.mobile.application_installed")
+        
+        // Kill SpringBoard using kernel-level primitives
+        let killResult = kill_process_by_name("SpringBoard")
+        if killResult != 0 {
+            // Fallback: userspace killall
+            let killall = "/usr/bin/killall"
+            if fm.fileExists(atPath: killall) {
+                _ = spawnBinary(killall, args: ["-9", "SpringBoard"])
+            }
+        }
     }
     
     func vfsinit(completion: ((Bool) -> Void)? = nil) {
@@ -949,44 +975,6 @@ final class laramgr: ObservableObject {
             registered += 1
         }
         logmsg("(uicache) ✅ registered \(registered) app(s)")
-    }
-    
-    /// Force SpringBoard to reload by invalidating the icon cache and killing SpringBoard.
-    /// Uses kernel-level process termination since userspace kill() may fail from sandboxed context.
-    func respring() {
-        logmsg("(uicache) triggering respring...")
-        
-        // Invalidate the icon cache
-        let cacheDir = "/var/mobile/Library/Caches/com.apple.springboard.csstore"
-        let fm = FileManager.default
-        if fm.fileExists(atPath: cacheDir) {
-            try? fm.removeItem(atPath: cacheDir)
-            logmsg("(uicache) cleared icon cache at \(cacheDir)")
-        }
-        
-        let altCache = "/var/mobile/Library/Caches/com.apple.SpringBoard"
-        if fm.fileExists(atPath: altCache) {
-            try? fm.removeItem(atPath: altCache)
-            logmsg("(uicache) cleared icon cache at \(altCache)")
-        }
-        
-        // Post refresh notifications
-        notify_post("com.apple.springboard.needsRefresh")
-        notify_post("com.apple.mobile.application_installed")
-        logmsg("(uicache) posted refresh notifications")
-        
-        // Kill SpringBoard using kernel-level primitives
-        let killResult = kill_process_by_name("SpringBoard")
-        if killResult == 0 {
-            logmsg("(uicache) SpringBoard killed via kernel primitives — respringing")
-        } else {
-            logmsg("(uicache) kernel kill failed, trying userspace killall...")
-            let killall = "/usr/bin/killall"
-            if fm.fileExists(atPath: killall) {
-                let ret = spawnBinary(killall, args: ["-9", "SpringBoard"])
-                logmsg("(uicache) killall SpringBoard returned \(ret)")
-            }
-        }
     }
     
     // === SSH ===
