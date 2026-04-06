@@ -459,14 +459,21 @@ final class laramgr: ObservableObject {
                 }
                 logmsg("(jb) directory structure ready")
 
-                // Create /var/jb directory (needed so the vnode exists for redirect)
+                // Create /var/jb directory using kernel-level vfs_mkdir
+                // (FileManager.createDirectory fails because /private/var/ is root-owned)
                 let varJbPath = "/private/var/jb"
                 if !fm.fileExists(atPath: varJbPath) {
-                    do {
-                        try fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
-                        logmsg("(jb) created /var/jb directory for vnode redirect")
-                    } catch {
-                        logmsg("(jb) mkdir /var/jb failed: \(error.localizedDescription)")
+                    if vfs_isready() {
+                        let mkr = vfs_mkdir(varJbPath, 0o755)
+                        if mkr == 0 {
+                            logmsg("(jb) created /var/jb via kernel vfs_mkdir")
+                        } else {
+                            logmsg("(jb) vfs_mkdir /var/jb failed (\(mkr)), trying FileManager...")
+                            try? fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
+                        }
+                    } else {
+                        logmsg("(jb) vfs not ready, trying FileManager for /var/jb...")
+                        try? fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
                     }
                 }
                 
@@ -749,7 +756,10 @@ final class laramgr: ObservableObject {
                         if FileManager.default.fileExists(atPath: jbSh) {
                             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jbSh)
                             self.logmsg("(jb) running prep_bootstrap.sh...")
-                            let ret = self.spawnBinary(jbSh, args: [prepScript])
+                            // Pass NO_PASSWORD_PROMPT=1 to skip uialert (can't show from background spawn)
+                            // Pass PATH so procursus binaries are found
+                            let cmd = "NO_PASSWORD_PROMPT=1 PATH=\(targetDir)/usr/bin:\(targetDir)/bin:/usr/bin:/bin \(prepScript)"
+                            let ret = self.spawnBinary(jbSh, args: ["-c", cmd])
                             self.logmsg("(jb) prep_bootstrap.sh exited with code \(ret)")
                         } else {
                             self.logmsg("(jb) ⚠️ bin/sh not found at \(jbSh) — skipping prep_bootstrap.sh")
@@ -825,6 +835,15 @@ final class laramgr: ObservableObject {
             self.logmsg("(flow) escape result: \(self.sbxExtEscaped)")
 
             if self.sbxExtEscaped {
+                // Initialize VFS (kernel filesystem access) before creating dirs
+                self.logmsg("(flow) initializing VFS...")
+                vfs_init()
+                if vfs_isready() {
+                    self.logmsg("(flow) VFS ready!")
+                } else {
+                    self.logmsg("(flow) VFS init failed — vnode redirect won't be available")
+                }
+                
                 self.logmsg("(flow) creating jb dirs...")
                 DispatchQueue.main.async {
                     self.createVarJb()

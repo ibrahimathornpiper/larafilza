@@ -29,9 +29,11 @@ fi
 # === SSH Setup ===
 SSH_ETC=/private/var/mobile/procursus/etc/ssh
 SSH_RUN=/private/var/mobile/procursus/var/run
+JBROOT=/private/var/mobile/procursus
 
-# Create required directories
-/bin/mkdir -p "$SSH_ETC" "$SSH_RUN"
+# Create required directories (use procursus mkdir, not system /bin/mkdir)
+"$JBROOT/bin/mkdir" -p "$SSH_ETC" 2>/dev/null || true
+"$JBROOT/bin/mkdir" -p "$SSH_RUN" 2>/dev/null || true
 
 # Write a permissive sshd_config
 cat > "$SSH_ETC/sshd_config" << 'EOF'
