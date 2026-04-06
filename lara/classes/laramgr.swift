@@ -911,8 +911,13 @@ final class laramgr: ObservableObject {
                 logmsg("(uicache) ✅ installed \(bundleID) via installApplication")
             } else {
                 logmsg("(uicache) ❌ no registration method found")
+                return
             }
         }
+        
+        // Notify SpringBoard to refresh its icon cache
+        notify_post("com.apple.mobile.application_installed")
+        logmsg("(uicache) posted application_installed notification to SpringBoard")
     }
     
     // === SSH ===
