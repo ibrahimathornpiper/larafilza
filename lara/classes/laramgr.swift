@@ -459,40 +459,10 @@ final class laramgr: ObservableObject {
                 }
                 logmsg("(jb) directory structure ready")
 
-                // Create /var/jb directory using kernel-level vfs_mkdir
-                // (FileManager.createDirectory fails because /private/var/ is root-owned)
-                let varJbPath = "/private/var/jb"
-                if !fm.fileExists(atPath: varJbPath) {
-                    if vfs_isready() {
-                        let mkr = vfs_mkdir(varJbPath, 0o755)
-                        if mkr == 0 {
-                            logmsg("(jb) created /var/jb via kernel vfs_mkdir")
-                        } else {
-                            logmsg("(jb) vfs_mkdir /var/jb failed (\(mkr)), trying FileManager...")
-                            try? fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
-                        }
-                    } else {
-                        logmsg("(jb) vfs not ready, trying FileManager for /var/jb...")
-                        try? fm.createDirectory(atPath: varJbPath, withIntermediateDirectories: true)
-                    }
-                }
-                
-                // Kernel-level vnode redirect: /var/jb → procursus root
-                // This swaps the v_data pointer so any access to /var/jb
-                // transparently reads from /private/var/mobile/procursus
-                if vfs_isready() {
-                    let result = vfs_vnode_redirect_folder("/private/var/jb", jbRoot)
-                    if result != 0 {
-                        logmsg("(jb) ✅ vnode redirect /var/jb → \(jbRoot) (orig_v_data=0x\(String(result, radix: 16)))")
-                    } else {
-                        logmsg("(jb) ⚠️ vnode redirect failed — /var/jb won't work as alias")
-                        // Fallback: try symlink anyway
-                        try? fm.createSymbolicLink(atPath: varJbPath, withDestinationPath: jbRoot)
-                    }
-                } else {
-                    logmsg("(jb) vfs not ready — trying symlink fallback")
-                    try? fm.createSymbolicLink(atPath: varJbPath, withDestinationPath: jbRoot)
-                }
+                // Note: /var/jb symlink/directory cannot be created on iOS 18
+                // (MACF blocks writes to /private/var/ even with sandbox escape).
+                // The jailbreak check treats the procursus root itself as the
+                // /var/jb equivalent — all paths use jbRoot directly.
 
                 return true
             } catch {
@@ -743,7 +713,7 @@ final class laramgr: ObservableObject {
                     return
                 }
                 
-                let extractOK = Extractor.extractTar(data: tarData, destPath: targetDir, stripPrefix: "./")
+                let extractOK = Extractor.extractTar(data: tarData, destPath: targetDir, stripPrefix: "./var/jb/")
                 if extractOK {
                     self.logmsg("(jb) ✅ bootstrap extracted!")
                     

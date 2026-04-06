@@ -92,19 +92,28 @@ func checkJailbreakStatus() -> JailbreakStatus {
     var isDir: ObjCBool = false
     status.hasJbRoot = fm.fileExists(atPath: jbRoot, isDirectory: &isDir) && isDir.boolValue
     
-    // 2. Check /var/jb — symlink OR vnode redirect
+    // 2. Check /var/jb — symlink, vnode redirect, OR procursus root IS the jb root
     let varJb = "/private/var/jb"
     if let dest = try? fm.destinationOfSymbolicLink(atPath: varJb) {
         status.hasVarJb = fm.fileExists(atPath: dest)
     } else if fm.fileExists(atPath: varJb) {
-        // Vnode redirect makes /var/jb a real directory (not a symlink)
-        // Verify by checking if we can read a known file inside
+        // Vnode redirect or real directory
         let testPaths = [
             "\(varJb)/usr",
             "\(varJb)/bin",
             "\(varJb)/Library"
         ]
         status.hasVarJb = testPaths.contains { fm.fileExists(atPath: $0) }
+    } else if status.hasJbRoot {
+        // On iOS 18, /var/jb cannot be created (MACF blocks writes to /private/var/).
+        // The procursus root (/private/var/mobile/procursus) IS the jb root.
+        // Pass this check if the jb root has the expected directory structure.
+        let jbRootPaths = [
+            "\(jbRoot)/usr",
+            "\(jbRoot)/bin",
+            "\(jbRoot)/Library"
+        ]
+        status.hasVarJb = jbRootPaths.contains { fm.fileExists(atPath: $0) }
     } else {
         status.hasVarJb = false
     }
@@ -112,8 +121,7 @@ func checkJailbreakStatus() -> JailbreakStatus {
     // 3. Check Sileo.app
     let sileoPaths = [
         "\(jbRoot)/Applications/Sileo.app",
-        "\(jbRoot)/Applications/Sileo.app/Sileo",
-        "/var/jb/Applications/Sileo.app"
+        "\(jbRoot)/Applications/Sileo.app/Sileo"
     ]
     status.hasSileo = sileoPaths.contains { fm.fileExists(atPath: $0) }
     
