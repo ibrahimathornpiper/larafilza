@@ -368,6 +368,52 @@ struct ContentView: View {
                     } header: {
                         Text("Jailbreak")
                     }
+                    
+                    // === SSH / REMOTE ACCESS ===
+                    if mgr.elevated {
+                        Section {
+                            HStack {
+                                Image(systemName: "terminal")
+                                    .foregroundColor(.cyan)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("SSH Connection")
+                                        .font(.subheadline)
+                                    Text(sshConnectString())
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Spacer()
+                                if mgr.sshRunning {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                }
+                            }
+                            
+                            Button {
+                                mgr.startSSH()
+                            } label: {
+                                if mgr.sshRunning {
+                                    HStack {
+                                        Text("SSH Running")
+                                        Spacer()
+                                        Image(systemName: "network")
+                                            .foregroundColor(.green)
+                                    }
+                                } else {
+                                    HStack {
+                                        Image(systemName: "bolt.horizontal")
+                                        Text("Start SSH  (port 22)")
+                                    }
+                                }
+                            }
+                            .disabled(mgr.sshRunning)
+                        } header: {
+                            Text("Remote Access")
+                        } footer: {
+                            Text("Connect with the password set during bootstrap. User: mobile.")
+                        }
+                    }
                 }
                 
             }

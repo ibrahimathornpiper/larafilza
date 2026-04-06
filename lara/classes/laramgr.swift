@@ -39,6 +39,8 @@ final class laramgr: ObservableObject {
     
     @Published var jbStatus: JailbreakStatus = JailbreakStatus()
     
+    @Published var sshRunning: Bool = false
+    
     static let shared = laramgr()
     static let fontpath = "/System/Library/Fonts/Core/SFUI.ttf"
     static let jbRoot = "/private/var/mobile/procursus"
@@ -739,11 +741,33 @@ final class laramgr: ObservableObject {
                     // Use proper deb installer with dpkg registration
                     self.installDebToSystem(debURL: sileoDest) { installOK in
                         if installOK {
-                            self.logmsg("(jb) ✅ sileo installed! rootless jailbreak complete.")
+                            self.logmsg("(jb) ✅ sileo installed!")
                         } else {
                             self.logmsg("(jb) ❌ sileo deb install failed")
+                            DispatchQueue.main.async { completion(false) }
+                            return
                         }
-                        DispatchQueue.main.async { completion(installOK) }
+                        
+                        // === Install OpenSSH ===
+                        let opensshURL = URL(string: "https://apt.procurs.us/pool/main/o/openssh/openssh_9.7p1-1_iphoneos-arm64.deb")!
+                        let opensshDest = docs.appendingPathComponent("openssh.deb")
+                        self.logmsg("(jb) downloading openssh...")
+                        Extractor.downloadFile(url: opensshURL, destURL: opensshDest) { dlOK in
+                            if dlOK {
+                                self.logmsg("(jb) openssh downloaded. installing deb...")
+                                self.installDebToSystem(debURL: opensshDest) { sshOK in
+                                    if sshOK {
+                                        self.logmsg("(jb) ✅ openssh installed! rootless jailbreak complete.")
+                                    } else {
+                                        self.logmsg("(jb) ⚠️ openssh install failed (SSH wont work)")
+                                    }
+                                    DispatchQueue.main.async { completion(sshOK || installOK) }
+                                }
+                            } else {
+                                self.logmsg("(jb) ⚠️ openssh download failed (SSH wont work, jailbreak still ok)")
+                                DispatchQueue.main.async { completion(installOK) }
+                            }
+                        }
                     }
                 }
             }
@@ -793,4 +817,62 @@ final class laramgr: ObservableObject {
             self.logmsg("(jb-check) status: \(status.statusText) (\(status.passCount)/\(JailbreakStatus.totalChecks) checks pass)")
         }
     }
+    
+    // === SSH ===
+    
+    /// Start sshd from the procursus bootstrap.
+    func startSSH() {
+        let sshd = "\(Self.jbRoot)/usr/sbin/sshd"
+        let keygen = "\(Self.jbRoot)/usr/bin/ssh-keygen"
+        let etcSSH = "\(Self.jbRoot)/etc/ssh"
+        
+        guard FileManager.default.fileExists(atPath: sshd) else {
+            logmsg("(ssh) sshd not found at \(sshd) — install openssh first via Full Jailbreak")
+            return
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            
+            // Generate host keys if missing
+            let keyTypes = ["rsa", "ecdsa", "ed25519"]
+            for ktype in keyTypes {
+                let keyPath = "\(etcSSH)/ssh_host_\(ktype)_key"
+                if !FileManager.default.fileExists(atPath: keyPath) {
+                    self.logmsg("(ssh) generating \(ktype) host key...")
+                    let proc = Process()
+                    proc.launchPath = keygen
+                    proc.arguments = ["-t", ktype, "-f", keyPath, "-N", ""]
+                    try? proc.run()
+                    proc.waitUntilExit()
+                }
+            }
+            
+            // Launch sshd (foreground mode so we can track the process)
+            let proc = Process()
+            proc.launchPath = sshd
+            proc.arguments = ["-D", "-p", "22"]
+            
+            do {
+                try proc.run()
+                DispatchQueue.main.async {
+                    self.sshRunning = true
+                    self.logmsg("(ssh) ✅ sshd started on port 22")
+                    if let ip = getWifiIPAddress() {
+                        self.logmsg("(ssh) connect: ssh mobile@\(ip)")
+                    }
+                }
+                proc.waitUntilExit()
+                DispatchQueue.main.async {
+                    self.sshRunning = false
+                    self.logmsg("(ssh) sshd exited (code \(proc.terminationStatus))")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.logmsg("(ssh) ❌ failed to start sshd: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
 }
+
