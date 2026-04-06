@@ -585,7 +585,8 @@ final class laramgr: ObservableObject {
             self.logmsg("(deb) installing \(debURL.lastPathComponent)...")
             
             // Use full extraction — gets both data files and control metadata
-            let result = Extractor.extractDebFull(fileURL: debURL, destPath: targetDir)
+            // Procursus rootless debs use ./var/jb/ prefix in data.tar
+            let result = Extractor.extractDebFull(fileURL: debURL, destPath: targetDir, stripPrefix: "./var/jb/")
             
             guard result.dataOK else {
                 self.logmsg("(deb) ❌ data extraction failed for \(debURL.lastPathComponent)")

@@ -353,7 +353,7 @@ class Extractor {
     
     /// Full deb extraction — extracts both data.tar and control.tar
     /// Returns (dataExtracted, controlData) where controlData is the raw control file contents
-    static func extractDebFull(fileURL: URL, destPath: String) -> (dataOK: Bool, controlInfo: String?) {
+    static func extractDebFull(fileURL: URL, destPath: String, stripPrefix: String? = nil) -> (dataOK: Bool, controlInfo: String?) {
         guard let data = try? Data(contentsOf: fileURL) else {
             print("(extractor) failed to read deb file")
             return (false, nil)
@@ -370,7 +370,7 @@ class Extractor {
             if member.name.hasPrefix("data.tar") {
                 print("(extractor) extracting data from: '\(member.name)'")
                 if let tarData = decompressTarPayload(name: member.name, payload: member.data) {
-                    dataExtracted = extractTar(data: tarData, destPath: destPath)
+                    dataExtracted = extractTar(data: tarData, destPath: destPath, stripPrefix: stripPrefix)
                 }
             }
             
