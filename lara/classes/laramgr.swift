@@ -756,6 +756,10 @@ final class laramgr: ObservableObject {
                     self.installDebToSystem(debURL: sileoDest) { installOK in
                         if installOK {
                             self.logmsg("(jb) ✅ sileo installed!")
+                            
+                            // Register Sileo with SpringBoard so it appears on home screen
+                            let sileoBundlePath = (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app")
+                            self.registerAppWithSpringBoard(bundlePath: sileoBundlePath)
                         } else {
                             self.logmsg("(jb) ❌ sileo deb install failed")
                             DispatchQueue.main.async { completion(false) }
@@ -838,6 +842,76 @@ final class laramgr: ObservableObject {
         DispatchQueue.main.async {
             self.jbStatus = status
             self.logmsg("(jb-check) status: \(status.statusText) (\(status.passCount)/\(JailbreakStatus.totalChecks) checks pass)")
+        }
+    }
+    
+    // === App Registration ===
+    
+    /// Register an app bundle with SpringBoard so it appears on the home screen.
+    /// Uses uicache (if available) or LSApplicationWorkspace private API.
+    func registerAppWithSpringBoard(bundlePath: String) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: bundlePath) else {
+            logmsg("(uicache) app bundle not found: \(bundlePath)")
+            return
+        }
+        
+        logmsg("(uicache) registering \(bundlePath) with SpringBoard...")
+        
+        // Method 1: Try uicache binary from bootstrap
+        let uicache = (Self.jbRoot as NSString).appendingPathComponent("usr/bin/uicache")
+        if fm.fileExists(atPath: uicache) {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: uicache)
+            let ret = spawnBinary(uicache, args: ["-p", bundlePath])
+            logmsg("(uicache) uicache -p returned \(ret)")
+            if ret == 0 { return }
+        }
+        
+        // Method 2: Use LSApplicationWorkspace private API
+        logmsg("(uicache) using LSApplicationWorkspace API...")
+        let bundleURL = URL(fileURLWithPath: bundlePath)
+        let infoPlist = bundleURL.appendingPathComponent("Info.plist")
+        
+        guard let info = NSDictionary(contentsOf: infoPlist),
+              let bundleID = info["CFBundleIdentifier"] as? String else {
+            logmsg("(uicache) ❌ can't read bundle ID from Info.plist")
+            return
+        }
+        
+        // LSApplicationWorkspace.defaultWorkspace.registerApplicationDictionary:
+        guard let lsClass = NSClassFromString("LSApplicationWorkspace") else {
+            logmsg("(uicache) ❌ LSApplicationWorkspace not available")
+            return
+        }
+        
+        let workspace = lsClass.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue()
+        guard let ws = workspace else {
+            logmsg("(uicache) ❌ couldn't get defaultWorkspace")
+            return
+        }
+        
+        let appDict: [String: Any] = [
+            "ApplicationType": "System",
+            "CFBundleIdentifier": bundleID,
+            "Path": bundlePath,
+            "Container": bundlePath,
+            "IsDeletable": false
+        ]
+        
+        let sel = NSSelectorFromString("registerApplicationDictionary:")
+        if ws.responds(to: sel) {
+            _ = ws.perform(sel, with: appDict)
+            logmsg("(uicache) ✅ registered \(bundleID) via LSApplicationWorkspace")
+        } else {
+            // Fallback: installApplication:withOptions:error:
+            let installSel = NSSelectorFromString("installApplication:withOptions:error:")
+            if ws.responds(to: installSel) {
+                let options: [String: Any] = ["CFBundleIdentifier": bundleID]
+                _ = ws.perform(NSSelectorFromString("installApplication:withOptions:"), with: bundleURL, with: options)
+                logmsg("(uicache) ✅ installed \(bundleID) via LSApplicationWorkspace.installApplication")
+            } else {
+                logmsg("(uicache) ❌ no registration method found")
+            }
         }
     }
     
