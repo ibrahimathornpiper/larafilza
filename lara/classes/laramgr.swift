@@ -820,11 +820,37 @@ final class laramgr: ObservableObject {
     
     // === SSH ===
     
+    /// Spawn a binary using posix_spawn (iOS-compatible, no Foundation.Process)
+    @discardableResult
+    private func spawnBinary(_ path: String, args: [String]) -> Int32 {
+        let cPath = strdup(path)
+        defer { free(cPath) }
+        
+        // Build null-terminated argv array: [path, arg1, arg2, ..., nil]
+        var cArgs: [UnsafeMutablePointer<CChar>?] = [cPath]
+        let duped = args.map { strdup($0) }
+        cArgs.append(contentsOf: duped.map { $0 as UnsafeMutablePointer<CChar>? })
+        cArgs.append(nil)
+        defer { duped.forEach { free($0) } }
+        
+        var pid: pid_t = 0
+        let status = posix_spawn(&pid, path, nil, nil, &cArgs, nil)
+        if status != 0 {
+            return status
+        }
+        
+        // Wait for child to finish
+        var exitStatus: Int32 = 0
+        waitpid(pid, &exitStatus, 0)
+        return exitStatus
+    }
+    
     /// Start sshd from the procursus bootstrap.
     func startSSH() {
         let sshd = "\(Self.jbRoot)/usr/sbin/sshd"
         let keygen = "\(Self.jbRoot)/usr/bin/ssh-keygen"
         let etcSSH = "\(Self.jbRoot)/etc/ssh"
+        let sshdConfig = "\(etcSSH)/sshd_config"
         
         guard FileManager.default.fileExists(atPath: sshd) else {
             logmsg("(ssh) sshd not found at \(sshd) — install openssh first via Full Jailbreak")
@@ -834,45 +860,56 @@ final class laramgr: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             
+            // Ensure etc/ssh directory exists
+            try? FileManager.default.createDirectory(atPath: etcSSH, withIntermediateDirectories: true)
+            
             // Generate host keys if missing
             let keyTypes = ["rsa", "ecdsa", "ed25519"]
             for ktype in keyTypes {
                 let keyPath = "\(etcSSH)/ssh_host_\(ktype)_key"
                 if !FileManager.default.fileExists(atPath: keyPath) {
                     self.logmsg("(ssh) generating \(ktype) host key...")
-                    let proc = Process()
-                    proc.launchPath = keygen
-                    proc.arguments = ["-t", ktype, "-f", keyPath, "-N", ""]
-                    try? proc.run()
-                    proc.waitUntilExit()
+                    let r = self.spawnBinary(keygen, args: ["-t", ktype, "-f", keyPath, "-N", ""])
+                    if r != 0 {
+                        self.logmsg("(ssh) ⚠️ keygen for \(ktype) returned \(r)")
+                    }
                 }
             }
             
-            // Launch sshd (foreground mode so we can track the process)
-            let proc = Process()
-            proc.launchPath = sshd
-            proc.arguments = ["-D", "-p", "22"]
+            // Launch sshd via posix_spawn (non-blocking — we don't waitpid so it stays running)
+            let cPath = strdup(sshd)
+            defer { free(cPath) }
             
-            do {
-                try proc.run()
+            var argv: [UnsafeMutablePointer<CChar>?] = [cPath]
+            let sshdArgs: [String]
+            if FileManager.default.fileExists(atPath: sshdConfig) {
+                sshdArgs = ["-f", sshdConfig, "-p", "22"]
+            } else {
+                sshdArgs = ["-p", "22"]
+            }
+            let duped = sshdArgs.map { strdup($0) }
+            argv.append(contentsOf: duped.map { $0 as UnsafeMutablePointer<CChar>? })
+            argv.append(nil)
+            defer { duped.forEach { free($0) } }
+            
+            var pid: pid_t = 0
+            let spawnResult = posix_spawn(&pid, sshd, nil, nil, &argv, nil)
+            
+            if spawnResult == 0 {
                 DispatchQueue.main.async {
                     self.sshRunning = true
-                    self.logmsg("(ssh) ✅ sshd started on port 22")
+                    self.logmsg("(ssh) ✅ sshd started (pid \(pid)) on port 22")
                     if let ip = getWifiIPAddress() {
                         self.logmsg("(ssh) connect: ssh mobile@\(ip)")
                     }
                 }
-                proc.waitUntilExit()
+            } else {
                 DispatchQueue.main.async {
-                    self.sshRunning = false
-                    self.logmsg("(ssh) sshd exited (code \(proc.terminationStatus))")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.logmsg("(ssh) ❌ failed to start sshd: \(error.localizedDescription)")
+                    self.logmsg("(ssh) ❌ posix_spawn failed with code \(spawnResult)")
                 }
             }
         }
     }
+
 }
 
