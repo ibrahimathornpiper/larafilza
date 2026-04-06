@@ -760,6 +760,9 @@ final class laramgr: ObservableObject {
                             // Register Sileo with SpringBoard so it appears on home screen
                             let sileoBundlePath = (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app")
                             self.registerAppWithSpringBoard(bundlePath: sileoBundlePath)
+                            
+                            // Scan and register ALL apps in the jailbreak Applications directory
+                            self.uicacheAll()
                         } else {
                             self.logmsg("(jb) ❌ sileo deb install failed")
                             DispatchQueue.main.async { completion(false) }
@@ -779,10 +782,18 @@ final class laramgr: ObservableObject {
                                     } else {
                                         self.logmsg("(jb) ⚠️ openssh install failed (SSH wont work)")
                                     }
+                                    
+                                    // Trigger respring so SpringBoard picks up the new apps
+                                    self.respring()
+                                    
                                     DispatchQueue.main.async { completion(sshOK || installOK) }
                                 }
                             } else {
                                 self.logmsg("(jb) ⚠️ openssh download failed (SSH wont work, jailbreak still ok)")
+                                
+                                // Still respring even if openssh download failed
+                                self.respring()
+                                
                                 DispatchQueue.main.async { completion(installOK) }
                             }
                         }
@@ -918,6 +929,64 @@ final class laramgr: ObservableObject {
         // Notify SpringBoard to refresh its icon cache
         notify_post("com.apple.mobile.application_installed")
         logmsg("(uicache) posted application_installed notification to SpringBoard")
+    }
+    
+    /// Scan all .app bundles in the jailbreak Applications directory and register each with SpringBoard.
+    /// This mimics what the classic uicache tool does.
+    func uicacheAll() {
+        let appsDir = (Self.jbRoot as NSString).appendingPathComponent("Applications")
+        let fm = FileManager.default
+        guard let appBundles = try? fm.contentsOfDirectory(atPath: appsDir) else {
+            logmsg("(uicache) ❌ cannot list \(appsDir)")
+            return
+        }
+        
+        logmsg("(uicache) scanning \(appsDir) for .app bundles...")
+        var registered = 0
+        for entry in appBundles where entry.hasSuffix(".app") {
+            let bundlePath = (appsDir as NSString).appendingPathComponent(entry)
+            registerAppWithSpringBoard(bundlePath: bundlePath)
+            registered += 1
+        }
+        logmsg("(uicache) ✅ registered \(registered) app(s)")
+    }
+    
+    /// Force SpringBoard to reload by invalidating the icon cache and killing SpringBoard.
+    /// Uses kernel-level process termination since userspace kill() may fail from sandboxed context.
+    func respring() {
+        logmsg("(uicache) triggering respring...")
+        
+        // Invalidate the icon cache
+        let cacheDir = "/var/mobile/Library/Caches/com.apple.springboard.csstore"
+        let fm = FileManager.default
+        if fm.fileExists(atPath: cacheDir) {
+            try? fm.removeItem(atPath: cacheDir)
+            logmsg("(uicache) cleared icon cache at \(cacheDir)")
+        }
+        
+        let altCache = "/var/mobile/Library/Caches/com.apple.SpringBoard"
+        if fm.fileExists(atPath: altCache) {
+            try? fm.removeItem(atPath: altCache)
+            logmsg("(uicache) cleared icon cache at \(altCache)")
+        }
+        
+        // Post refresh notifications
+        notify_post("com.apple.springboard.needsRefresh")
+        notify_post("com.apple.mobile.application_installed")
+        logmsg("(uicache) posted refresh notifications")
+        
+        // Kill SpringBoard using kernel-level primitives
+        let killResult = kill_process_by_name("SpringBoard")
+        if killResult == 0 {
+            logmsg("(uicache) SpringBoard killed via kernel primitives — respringing")
+        } else {
+            logmsg("(uicache) kernel kill failed, trying userspace killall...")
+            let killall = "/usr/bin/killall"
+            if fm.fileExists(atPath: killall) {
+                let ret = spawnBinary(killall, args: ["-9", "SpringBoard"])
+                logmsg("(uicache) killall SpringBoard returned \(ret)")
+            }
+        }
     }
     
     // === SSH ===
