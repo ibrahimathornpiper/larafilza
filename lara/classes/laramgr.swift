@@ -350,14 +350,15 @@ final class laramgr: ObservableObject {
         for storePath in lsStorePaths {
             guard fm.fileExists(atPath: storePath) else { continue }
 
-            // The store is a binary plist (NSData-backed dictionary)
-            guard var dict = NSMutableDictionary(contentsOfFile: storePath) else {
+            // Read as immutable first, then build mutable copy
+            guard let srcDict = NSDictionary(contentsOfFile: storePath) else {
                 logmsg("(uicache) ⚠️ could not read LS store at \(storePath)")
                 continue
             }
+            let dict = NSMutableDictionary(dictionary: srcDict)
 
             // The schema: key = bundle ID, value = dict with Path, ApplicationType, etc.
-            let entry: NSMutableDictionary = [
+            let entry: NSDictionary = [
                 "Path": bundlePath,
                 "ApplicationType": "User",
                 "CFBundleIdentifier": bundleID,
@@ -368,10 +369,6 @@ final class laramgr: ObservableObject {
             // Try existing apps key
             if let apps = dict["applications"] as? NSMutableDictionary {
                 apps[bundleID] = entry
-            } else if let apps = dict[bundleID] {
-                _ = apps // already registered
-                logmsg("(uicache) ℹ️ \(bundleID) already in LS store at \(storePath)")
-                return
             } else {
                 dict[bundleID] = entry
             }
@@ -1136,19 +1133,19 @@ final class laramgr: ObservableObject {
         // then try framework paths.
         logmsg("(uicache) trying _LSRegisterURL via dlopen...")
         let cfURL = URL(fileURLWithPath: effectiveBundlePath, isDirectory: true) as CFURL
-        typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
         var registeredViaDlopen = false
 
-        func tryLSRegisterURL(_ sym: UnsafeMutableRawPointer) -> Bool {
+        // Helper: cast sym to _LSRegisterURL C function and call it
+        let tryLSReg: (UnsafeMutableRawPointer) -> Bool = { sym in
+            typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
             let fn = unsafeBitCast(sym, to: LSRegFn.self)
             let rc = fn(cfURL, true)
-            logmsg("(uicache) _LSRegisterURL returned \(rc)")
             return rc == 0
         }
 
         // a) Already loaded in process (dyld shared cache)
         if let sym = dlsym(RTLD_DEFAULT, "_LSRegisterURL") {
-            registeredViaDlopen = tryLSRegisterURL(sym)
+            registeredViaDlopen = tryLSReg(sym)
             if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via RTLD_DEFAULT") }
         }
 
@@ -1156,7 +1153,7 @@ final class laramgr: ObservableObject {
         if !registeredViaDlopen {
             let miPath = "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
             if let h = dlopen(miPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
-                registeredViaDlopen = tryLSRegisterURL(sym)
+                registeredViaDlopen = tryLSReg(sym)
                 if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via MobileInstallation") }
                 dlclose(h)
             } else {
@@ -1169,7 +1166,7 @@ final class laramgr: ObservableObject {
         if !registeredViaDlopen {
             let csPath = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
             if let h = dlopen(csPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
-                registeredViaDlopen = tryLSRegisterURL(sym)
+                registeredViaDlopen = tryLSReg(sym)
                 if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via CoreServices") }
                 dlclose(h)
             }
