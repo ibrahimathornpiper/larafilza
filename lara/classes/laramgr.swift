@@ -1134,18 +1134,12 @@ final class laramgr: ObservableObject {
         logmsg("(uicache) trying _LSRegisterURL via dlopen...")
         let cfURL = URL(fileURLWithPath: effectiveBundlePath, isDirectory: true) as CFURL
         var registeredViaDlopen = false
-
-        // Helper: cast sym to _LSRegisterURL C function and call it
-        let tryLSReg: (UnsafeMutableRawPointer) -> Bool = { sym in
-            typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
-            let fn = unsafeBitCast(sym, to: LSRegFn.self)
-            let rc = fn(cfURL, true)
-            return rc == 0
-        }
+        typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
 
         // a) Already loaded in process (dyld shared cache)
         if let sym = dlsym(RTLD_DEFAULT, "_LSRegisterURL") {
-            registeredViaDlopen = tryLSReg(sym)
+            let fn = unsafeBitCast(sym, to: LSRegFn.self)
+            registeredViaDlopen = fn(cfURL, true) == 0
             if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via RTLD_DEFAULT") }
         }
 
@@ -1153,7 +1147,8 @@ final class laramgr: ObservableObject {
         if !registeredViaDlopen {
             let miPath = "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
             if let h = dlopen(miPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
-                registeredViaDlopen = tryLSReg(sym)
+                let fn = unsafeBitCast(sym, to: LSRegFn.self)
+                registeredViaDlopen = fn(cfURL, true) == 0
                 if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via MobileInstallation") }
                 dlclose(h)
             } else {
@@ -1166,7 +1161,8 @@ final class laramgr: ObservableObject {
         if !registeredViaDlopen {
             let csPath = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
             if let h = dlopen(csPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
-                registeredViaDlopen = tryLSReg(sym)
+                let fn = unsafeBitCast(sym, to: LSRegFn.self)
+                registeredViaDlopen = fn(cfURL, true) == 0
                 if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via CoreServices") }
                 dlclose(h)
             }
