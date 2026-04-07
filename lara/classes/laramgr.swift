@@ -233,7 +233,6 @@ final class laramgr: ObservableObject {
             return
         }
 
-        // Open SQLite database
         var db: OpaquePointer?
         guard sqlite3_open(dbPath, &db) == SQLITE_OK, let db = db else {
             logmsg("(uicache) ❌ failed to open applicationState.db")
@@ -241,18 +240,7 @@ final class laramgr: ObservableObject {
         }
         defer { sqlite3_close(db) }
 
-        // The schema used by BackBoard:
-        //   CREATE TABLE IF NOT EXISTS application_state_internal (
-        //     id INTEGER PRIMARY KEY,
-        //     bundle_id TEXT NOT NULL UNIQUE,
-        //     install_type INTEGER,
-        //     path TEXT
-        //   );
-        // install_type 2 = user app; 1 = system app
-        // Some iOS versions use a slightly different schema — we use INSERT OR REPLACE
-        // to be safe, and fall back to a simpler INSERT.
         let bundleURL = "file://" + bundlePath + "/"
-
         let sql = """
             INSERT OR REPLACE INTO application_state_internal
             (bundle_id, install_type, path)
@@ -272,10 +260,62 @@ final class laramgr: ObservableObject {
                 logmsg("(uicache) ⚠️ applicationState.db step failed: \(String(cString: errMsg))")
             }
         } else if let errMsg = sqlite3_errmsg(db) {
-            // Table schema may differ — log and continue
             logmsg("(uicache) ⚠️ applicationState.db prepare failed: \(String(cString: errMsg))")
         }
     }
+
+    /// Inject the app into LaunchServices' application store plist cache.
+    /// This is the cache file SpringBoard reads on launch that tracks all
+    /// installed user apps. Path varies by iOS version — we check both.
+    func injectIntoLSApplicationStoreCache(bundlePath: String, bundleID: String) {
+        // Possible paths for the LS application store cache
+        let lsStorePaths = [
+            "/var/mobile/Library/Caches/com.apple.LaunchServices.store",
+            "/var/mobile/Library/Caches/com.apple.mobile.LaunchServices.store",
+            "/var/mobile/Library/Caches/com.apple.LaunchServices.StoreManifest.kvstore"
+        ]
+        let fm = FileManager.default
+
+        for storePath in lsStorePaths {
+            guard fm.fileExists(atPath: storePath) else { continue }
+
+            // The store is a binary plist (NSData-backed dictionary)
+            guard var dict = NSMutableDictionary(contentsOfFile: storePath) else {
+                logmsg("(uicache) ⚠️ could not read LS store at \(storePath)")
+                continue
+            }
+
+            // The schema: key = bundle ID, value = dict with Path, ApplicationType, etc.
+            let entry: NSMutableDictionary = [
+                "Path": bundlePath,
+                "ApplicationType": "User",
+                "CFBundleIdentifier": bundleID,
+                "IsDeletable": false,
+                "IsAdHocSigned": true
+            ]
+
+            // Try existing apps key
+            if let apps = dict["applications"] as? NSMutableDictionary {
+                apps[bundleID] = entry
+            } else if let apps = dict[bundleID] {
+                _ = apps // already registered
+                logmsg("(uicache) ℹ️ \(bundleID) already in LS store at \(storePath)")
+                return
+            } else {
+                dict[bundleID] = entry
+            }
+
+            if (dict as NSDictionary).write(toFile: storePath, atomically: true) {
+                logmsg("(uicache) ✅ injected \(bundleID) into LS store at \(storePath)")
+                return
+            } else {
+                logmsg("(uicache) ⚠️ failed to write LS store at \(storePath)")
+            }
+        }
+
+        logmsg("(uicache) ℹ️ no existing LS store plist found (normal on fresh installs)")
+    }
+
     
     func vfsinit(completion: ((Bool) -> Void)? = nil) {
         vfs_setlogcallback(laramgr.vfslogcallback)
@@ -1008,26 +1048,55 @@ final class laramgr: ObservableObject {
             }
         }
 
-        // ── Method 2: _LSRegisterURL via dlsym (MobileInstallation framework) ───
-        // This is what the uicache binary does internally on iOS 14+.
-        // The private symbol `_LSRegisterURL` lives in the LaunchServices/
-        // MobileInstallation shared library loaded into every process.
-        logmsg("(uicache) using LSApplicationWorkspace API...")
+        // ── Method 2: _LSRegisterURL as a C function via dlopen ──────────────
+        // This is EXACTLY what procursus uicache does on iOS 14+.
+        // _LSRegisterURL is a plain C function — NOT an ObjC selector — exported
+        // from MobileInstallation.framework. Must be called via dlopen/dlsym.
+        // Signature: int _LSRegisterURL(CFURLRef url, Boolean updateIfPresent)
+        logmsg("(uicache) trying _LSRegisterURL via dlopen...")
 
-        // Build the file:// URL that LaunchServices expects
+        // dlopen MobileInstallation and call _LSRegisterURL(url, updateIfPresent)
+        let miPath = "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
+        var registeredViaDlopen = false
+        if let miHandle = dlopen(miPath, RTLD_LAZY | RTLD_GLOBAL) {
+            if let sym = dlsym(miHandle, "_LSRegisterURL") {
+                let cfURL = URL(fileURLWithPath: bundlePath, isDirectory: true) as CFURL
+                typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
+                let fn = unsafeBitCast(sym, to: LSRegFn.self)
+                let rc = fn(cfURL, true)
+                logmsg("(uicache) _LSRegisterURL(dlopen) returned \(rc)")
+                registeredViaDlopen = rc == 0
+                if registeredViaDlopen {
+                    logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL (dlopen)")
+                } else {
+                    logmsg("(uicache) ⚠️ _LSRegisterURL failed rc=\(rc)")
+                }
+            } else {
+                logmsg("(uicache) ⚠️ _LSRegisterURL symbol not found in MobileInstallation")
+            }
+            dlclose(miHandle)
+        } else {
+            let err = dlerror().map { String(cString: $0) } ?? "unknown"
+            logmsg("(uicache) ⚠️ dlopen MobileInstallation failed: \(err)")
+        }
+
+        if registeredViaDlopen {
+            notify_post("com.apple.mobile.application_installed")
+            logmsg("(uicache) posted application_installed notification to SpringBoard")
+            return
+        }
+
+        // ── Method 3: LSApplicationWorkspace ObjC selectors ──────────────────
         let appFileURL = URL(fileURLWithPath: bundlePath, isDirectory: true) as NSURL
-
-        // Try _LSRegisterURL via selector on workspace (bridged in-process)
         if let lsClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type {
             let dwSel = NSSelectorFromString("defaultWorkspace")
             if lsClass.responds(to: dwSel),
                let wsObj = lsClass.perform(dwSel)?.takeUnretainedValue() as? NSObject {
 
-                // iOS 14+ correct registration method: -_LSRegisterURL:withOptions:
                 let regURLSel = NSSelectorFromString("_LSRegisterURL:withOptions:")
                 if wsObj.responds(to: regURLSel) {
                     let options: NSDictionary = [
-                        "LSInstallType": 2, // LSApplicationTypeUser in LS enum
+                        "LSInstallType": 2,
                         "ApplicationDSID": 0,
                         "IsAdHocSigned": true,
                         "CFBundleIdentifier": bundleID
@@ -1035,21 +1104,17 @@ final class laramgr: ObservableObject {
                     _ = wsObj.perform(regURLSel, with: appFileURL, with: options)
                     logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL:withOptions:")
                     notify_post("com.apple.mobile.application_installed")
-                    logmsg("(uicache) posted application_installed notification to SpringBoard")
                     return
                 }
 
-                // Older fallback: -_LSRegisterURL:
                 let regURLSel2 = NSSelectorFromString("_LSRegisterURL:")
                 if wsObj.responds(to: regURLSel2) {
                     _ = wsObj.perform(regURLSel2, with: appFileURL)
                     logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL:")
                     notify_post("com.apple.mobile.application_installed")
-                    logmsg("(uicache) posted application_installed notification to SpringBoard")
                     return
                 }
 
-                // Last-resort: registerApplicationDictionary (deprecated, may be no-op on iOS 15+)
                 let dictSel = NSSelectorFromString("registerApplicationDictionary:")
                 if wsObj.responds(to: dictSel) {
                     let appDict: NSDictionary = [
@@ -1062,20 +1127,21 @@ final class laramgr: ObservableObject {
                     _ = wsObj.perform(dictSel, with: appDict)
                     logmsg("(uicache) ✅ registered \(bundleID) via registerApplicationDictionary:")
                 } else {
-                    logmsg("(uicache) ❌ no LSApplicationWorkspace registration selector responded")
+                    logmsg("(uicache) ❌ no registration selector responded on workspace")
                 }
-            } else {
-                logmsg("(uicache) ❌ couldn't get defaultWorkspace")
             }
-        } else {
-            logmsg("(uicache) ❌ LSApplicationWorkspace class not available")
         }
 
-        // ── Method 3: Direct applicationState.db injection (most reliable on iOS 14+) ──
-        // _LSRegisterURL needs entitlements we don't have. Writing directly into
-        // BackBoard's SQLite database is always read by SpringBoard on relaunch.
+        // ── Method 4: applicationState.db SQLite injection ───────────────────
         if !bundleID.isEmpty {
             injectIntoBBApplicationStateDB(bundlePath: bundlePath, bundleID: bundleID)
+        }
+
+        // ── Method 5: LaunchServices store plist injection ───────────────────
+        // Some iOS versions store the app registry in a binary plist that
+        // SpringBoard reads on every launch. Injecting here is a guaranteed fallback.
+        if !bundleID.isEmpty {
+            injectIntoLSApplicationStoreCache(bundlePath: bundlePath, bundleID: bundleID)
         }
 
         notify_post("com.apple.mobile.application_installed")
