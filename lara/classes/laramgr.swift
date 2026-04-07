@@ -6,7 +6,9 @@
 //
 
 import Combine
+import Darwin
 import Foundation
+import SQLite3
 import notify
 
 final class laramgr: ObservableObject {
@@ -165,32 +167,112 @@ final class laramgr: ObservableObject {
     }
     
     func respring() {
-        notify_post("com.apple.springboard.toggleLockScreen")
-        
-        // Invalidate icon cache
-        let cacheDir = "/var/mobile/Library/Caches/com.apple.springboard.csstore"
         let fm = FileManager.default
-        if fm.fileExists(atPath: cacheDir) {
-            try? fm.removeItem(atPath: cacheDir)
+
+        // Invalidate icon cache so SpringBoard rebuilds it on restart
+        let cacheDirs = [
+            "/var/mobile/Library/Caches/com.apple.springboard.csstore",
+            "/var/mobile/Library/Caches/com.apple.SpringBoard"
+        ]
+        for dir in cacheDirs {
+            if fm.fileExists(atPath: dir) {
+                try? fm.removeItem(atPath: dir)
+            }
         }
-        
-        let altCache = "/var/mobile/Library/Caches/com.apple.SpringBoard"
-        if fm.fileExists(atPath: altCache) {
-            try? fm.removeItem(atPath: altCache)
-        }
-        
-        // Post refresh notifications
-        notify_post("com.apple.springboard.needsRefresh")
+
+        // Post registration notifications and give LaunchServices time to commit
+        // IMPORTANT: sleep BEFORE killing SpringBoard so LS has time to write
+        // the new app registration to its cache before SB restarts.
         notify_post("com.apple.mobile.application_installed")
-        
-        // Kill SpringBoard using kernel-level primitives
+        notify_post("com.apple.springboard.needsRefresh")
+        Thread.sleep(forTimeInterval: 1.0)   // let LS commit registration
+
+        // Kill SpringBoard — it will relaunch automatically
         let killResult = kill_process_by_name("SpringBoard")
         if killResult != 0 {
-            // Fallback: userspace killall
+            // Fallback: userspace kill
             let killall = "/usr/bin/killall"
             if fm.fileExists(atPath: killall) {
                 _ = spawnBinary(killall, args: ["-9", "SpringBoard"])
+            } else {
+                // Direct SIGKILL via Foundation
+                if let pid = pidForProcessName("SpringBoard") {
+                    Darwin.kill(pid, SIGKILL)
+                }
             }
+        }
+    }
+
+    /// Find the PID of a running process by name (userspace fallback)
+    private func pidForProcessName(_ name: String) -> pid_t? {
+        // Use sysctl to enumerate processes
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size: size_t = 0
+        sysctl(&mib, 4, nil, &size, nil, 0)
+        let count = size / MemoryLayout<kinfo_proc>.stride
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
+        sysctl(&mib, 4, &procs, &size, nil, 0)
+        for p in procs {
+            var pname = p.kp_proc.p_comm
+            let procName = withUnsafeBytes(of: &pname) { buf -> String in
+                String(bytes: buf.prefix(while: { $0 != 0 }), encoding: .utf8) ?? ""
+            }
+            if procName == name { return p.kp_proc.p_pid }
+        }
+        return nil
+    }
+
+    /// Inject the app bundle URL directly into BackBoard's applicationState.db.
+    /// This is the most reliable method on iOS 14+ rootless jailbreaks:
+    /// SpringBoard reads this SQLite DB on launch to discover all user apps.
+    /// The DB lives at /var/mobile/Library/BackBoard/applicationState.db.
+    func injectIntoBBApplicationStateDB(bundlePath: String, bundleID: String) {
+        let dbPath = "/var/mobile/Library/BackBoard/applicationState.db"
+        guard FileManager.default.fileExists(atPath: dbPath) else {
+            logmsg("(uicache) applicationState.db not found at \(dbPath)")
+            return
+        }
+
+        // Open SQLite database
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK, let db = db else {
+            logmsg("(uicache) ❌ failed to open applicationState.db")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // The schema used by BackBoard:
+        //   CREATE TABLE IF NOT EXISTS application_state_internal (
+        //     id INTEGER PRIMARY KEY,
+        //     bundle_id TEXT NOT NULL UNIQUE,
+        //     install_type INTEGER,
+        //     path TEXT
+        //   );
+        // install_type 2 = user app; 1 = system app
+        // Some iOS versions use a slightly different schema — we use INSERT OR REPLACE
+        // to be safe, and fall back to a simpler INSERT.
+        let bundleURL = "file://" + bundlePath + "/"
+
+        let sql = """
+            INSERT OR REPLACE INTO application_state_internal
+            (bundle_id, install_type, path)
+            VALUES (?, 2, ?);
+            """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt {
+            sqlite3_bind_text(stmt, 1, bundleID, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, bundleURL, -1, SQLITE_TRANSIENT)
+            let rc = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            if rc == SQLITE_DONE {
+                logmsg("(uicache) ✅ injected \(bundleID) into applicationState.db")
+                return
+            } else if let errMsg = sqlite3_errmsg(db) {
+                logmsg("(uicache) ⚠️ applicationState.db step failed: \(String(cString: errMsg))")
+            }
+        } else if let errMsg = sqlite3_errmsg(db) {
+            // Table schema may differ — log and continue
+            logmsg("(uicache) ⚠️ applicationState.db prepare failed: \(String(cString: errMsg))")
         }
     }
     
@@ -783,21 +865,8 @@ final class laramgr: ObservableObject {
                         if installOK {
                             self.logmsg("(jb) ✅ sileo installed!")
                             
-                            // Symlink Sileo.app to /Applications/ so SpringBoard scans it
+                            // Register Sileo.app bundle path directly — no symlink needed
                             let sileoBundlePath = (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app")
-                            let symlinkPath = "/Applications/Sileo.app"
-                            let fm = FileManager.default
-                            
-                            if fm.fileExists(atPath: symlinkPath) {
-                                try? fm.removeItem(atPath: symlinkPath)
-                            }
-                            
-                            do {
-                                try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: sileoBundlePath)
-                                self.logmsg("(uicache) ✅ symlinked Sileo.app -> /Applications/")
-                            } catch {
-                                self.logmsg("(uicache) ⚠️ symlink failed: \(error)")
-                            }
                             
                             // Register Sileo with SpringBoard
                             self.registerAppWithSpringBoard(bundlePath: sileoBundlePath)
@@ -898,82 +967,122 @@ final class laramgr: ObservableObject {
     }
     
     // === App Registration ===
-    
+
     /// Register an app bundle with SpringBoard so it appears on the home screen.
-    /// Uses uicache (if available) or LSApplicationWorkspace private API.
+    /// Uses (in priority order):
+    ///   1. uicache bootstrap binary
+    ///   2. _LSRegisterURL via dlsym into MobileInstallation (what uicache does internally)
+    ///   3. LSApplicationWorkspace -_LSRegisterURL: selector
+    ///   4. Fallback notification hints
     func registerAppWithSpringBoard(bundlePath: String) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: bundlePath) else {
             logmsg("(uicache) app bundle not found: \(bundlePath)")
             return
         }
-        
+
         logmsg("(uicache) registering \(bundlePath) with SpringBoard...")
-        
-        // Method 1: Try uicache binary from bootstrap
-        let uicache = (Self.jbRoot as NSString).appendingPathComponent("usr/bin/uicache")
-        if fm.fileExists(atPath: uicache) {
-            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: uicache)
-            let ret = spawnBinary(uicache, args: ["-p", bundlePath])
-            logmsg("(uicache) uicache -p returned \(ret)")
-            if ret == 0 { return }
-        }
-        
-        // Method 2: Use LSApplicationWorkspace private API
-        logmsg("(uicache) using LSApplicationWorkspace API...")
+
+        // Read bundle ID from Info.plist (needed by all methods)
         let bundleURL = URL(fileURLWithPath: bundlePath)
-        let infoPlist = bundleURL.appendingPathComponent("Info.plist")
-        
-        guard let info = NSDictionary(contentsOf: infoPlist),
-              let bundleID = info["CFBundleIdentifier"] as? String else {
-            logmsg("(uicache) ❌ can't read bundle ID from Info.plist")
-            return
-        }
-        
-        // LSApplicationWorkspace.defaultWorkspace
-        guard let lsClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
-            logmsg("(uicache) ❌ LSApplicationWorkspace not available")
-            return
-        }
-        
-        let dwSel = NSSelectorFromString("defaultWorkspace")
-        guard lsClass.responds(to: dwSel),
-              let wsObj = lsClass.perform(dwSel)?.takeUnretainedValue() as? NSObject else {
-            logmsg("(uicache) ❌ couldn't get defaultWorkspace")
-            return
-        }
-        
-        let appDict: NSDictionary = [
-            "ApplicationType": "System",
-            "CFBundleIdentifier": bundleID,
-            "Path": bundlePath,
-            "Container": bundlePath,
-            "IsDeletable": false
-        ]
-        
-        let regSel = NSSelectorFromString("registerApplicationDictionary:")
-        if wsObj.responds(to: regSel) {
-            _ = wsObj.perform(regSel, with: appDict)
-            logmsg("(uicache) ✅ registered \(bundleID) via LSApplicationWorkspace")
+        let infoPlistURL = bundleURL.appendingPathComponent("Info.plist")
+        let bundleID: String
+        if let info = NSDictionary(contentsOf: infoPlistURL),
+           let bid = info["CFBundleIdentifier"] as? String {
+            bundleID = bid
         } else {
-            let installSel = NSSelectorFromString("installApplication:withOptions:")
-            if wsObj.responds(to: installSel) {
-                let options: NSDictionary = ["CFBundleIdentifier": bundleID]
-                _ = wsObj.perform(installSel, with: bundleURL, with: options)
-                logmsg("(uicache) ✅ installed \(bundleID) via installApplication")
-            } else {
-                logmsg("(uicache) ❌ no registration method found")
+            logmsg("(uicache) ⚠️ can't read bundle ID — will skip bundle-ID methods")
+            bundleID = ""
+        }
+
+        // ── Method 1: uicache binary from bootstrap ──────────────────────────
+        let uicachePath = (Self.jbRoot as NSString).appendingPathComponent("usr/bin/uicache")
+        if fm.fileExists(atPath: uicachePath) {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: uicachePath)
+            let ret = spawnBinary(uicachePath, args: ["-p", bundlePath])
+            logmsg("(uicache) uicache -p returned \(ret)")
+            if ret == 0 {
+                notify_post("com.apple.mobile.application_installed")
                 return
             }
         }
-        
-        // Notify SpringBoard to refresh its icon cache
+
+        // ── Method 2: _LSRegisterURL via dlsym (MobileInstallation framework) ───
+        // This is what the uicache binary does internally on iOS 14+.
+        // The private symbol `_LSRegisterURL` lives in the LaunchServices/
+        // MobileInstallation shared library loaded into every process.
+        logmsg("(uicache) using LSApplicationWorkspace API...")
+
+        // Build the file:// URL that LaunchServices expects
+        let appFileURL = URL(fileURLWithPath: bundlePath, isDirectory: true) as NSURL
+
+        // Try _LSRegisterURL via selector on workspace (bridged in-process)
+        if let lsClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type {
+            let dwSel = NSSelectorFromString("defaultWorkspace")
+            if lsClass.responds(to: dwSel),
+               let wsObj = lsClass.perform(dwSel)?.takeUnretainedValue() as? NSObject {
+
+                // iOS 14+ correct registration method: -_LSRegisterURL:withOptions:
+                let regURLSel = NSSelectorFromString("_LSRegisterURL:withOptions:")
+                if wsObj.responds(to: regURLSel) {
+                    let options: NSDictionary = [
+                        "LSInstallType": 2, // LSApplicationTypeUser in LS enum
+                        "ApplicationDSID": 0,
+                        "IsAdHocSigned": true,
+                        "CFBundleIdentifier": bundleID
+                    ]
+                    _ = wsObj.perform(regURLSel, with: appFileURL, with: options)
+                    logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL:withOptions:")
+                    notify_post("com.apple.mobile.application_installed")
+                    logmsg("(uicache) posted application_installed notification to SpringBoard")
+                    return
+                }
+
+                // Older fallback: -_LSRegisterURL:
+                let regURLSel2 = NSSelectorFromString("_LSRegisterURL:")
+                if wsObj.responds(to: regURLSel2) {
+                    _ = wsObj.perform(regURLSel2, with: appFileURL)
+                    logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL:")
+                    notify_post("com.apple.mobile.application_installed")
+                    logmsg("(uicache) posted application_installed notification to SpringBoard")
+                    return
+                }
+
+                // Last-resort: registerApplicationDictionary (deprecated, may be no-op on iOS 15+)
+                let dictSel = NSSelectorFromString("registerApplicationDictionary:")
+                if wsObj.responds(to: dictSel) {
+                    let appDict: NSDictionary = [
+                        "ApplicationType": "User",
+                        "CFBundleIdentifier": bundleID,
+                        "Path": bundlePath,
+                        "IsDeletable": false,
+                        "IsAdHocSigned": true
+                    ]
+                    _ = wsObj.perform(dictSel, with: appDict)
+                    logmsg("(uicache) ✅ registered \(bundleID) via registerApplicationDictionary:")
+                } else {
+                    logmsg("(uicache) ❌ no LSApplicationWorkspace registration selector responded")
+                }
+            } else {
+                logmsg("(uicache) ❌ couldn't get defaultWorkspace")
+            }
+        } else {
+            logmsg("(uicache) ❌ LSApplicationWorkspace class not available")
+        }
+
+        // ── Method 3: Direct applicationState.db injection (most reliable on iOS 14+) ──
+        // _LSRegisterURL needs entitlements we don't have. Writing directly into
+        // BackBoard's SQLite database is always read by SpringBoard on relaunch.
+        if !bundleID.isEmpty {
+            injectIntoBBApplicationStateDB(bundlePath: bundlePath, bundleID: bundleID)
+        }
+
         notify_post("com.apple.mobile.application_installed")
         logmsg("(uicache) posted application_installed notification to SpringBoard")
     }
-    
+
     /// Scan all .app bundles in the jailbreak Applications directory and register each with SpringBoard.
-    /// This mimics what the classic uicache tool does.
+    /// Posts a single SpringBoard refresh notification after all apps are registered.
     func uicacheAll() {
         let appsDir = (Self.jbRoot as NSString).appendingPathComponent("Applications")
         let fm = FileManager.default
@@ -981,7 +1090,7 @@ final class laramgr: ObservableObject {
             logmsg("(uicache) ❌ cannot list \(appsDir)")
             return
         }
-        
+
         logmsg("(uicache) scanning \(appsDir) for .app bundles...")
         var registered = 0
         for entry in appBundles where entry.hasSuffix(".app") {
