@@ -258,10 +258,11 @@ final class laramgr: ObservableObject {
             (bundle_id, install_type, path)
             VALUES (?, 2, ?);
             """
+        let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt {
-            sqlite3_bind_text(stmt, 1, bundleID, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 2, bundleURL, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 1, bundleID, -1, sqliteTransient)
+            sqlite3_bind_text(stmt, 2, bundleURL, -1, sqliteTransient)
             let rc = sqlite3_step(stmt)
             sqlite3_finalize(stmt)
             if rc == SQLITE_DONE {
