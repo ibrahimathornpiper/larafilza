@@ -222,7 +222,78 @@ final class laramgr: ObservableObject {
         return nil
     }
 
+    /// Create a proper MCM (Mobile Container Manager) bundle container for an app
+    /// under /var/mobile/Containers/Bundle/Application/<UUID>/.
+    ///
+    /// This is what Dopamine and palera1n bootstraps do for rootless app registration.
+    /// SpringBoard natively scans this directory on every launch, so apps placed here
+    /// appear on the home screen WITHOUT needing any LS API call.
+    ///
+    /// Returns the path to the app bundle INSIDE the container (for LS registration),
+    /// or nil if the container could not be created.
+    @discardableResult
+    func createMCMContainerForApp(bundlePath: String, bundleID: String) -> String? {
+        let containerRoot = "/var/mobile/Containers/Bundle/Application"
+        let containerUUID = UUID().uuidString.uppercased()
+        let containerPath = (containerRoot as NSString).appendingPathComponent(containerUUID)
+        let fm = FileManager.default
+        let appName = (bundlePath as NSString).lastPathComponent   // e.g. "Sileo.app"
+
+        // 1. Create the container directory
+        do {
+            try fm.createDirectory(atPath: containerPath, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        } catch {
+            logmsg("(mcm) ❌ failed to create container dir: \(error)")
+            return nil
+        }
+
+        // 2. Write MCM metadata plist
+        // This file tells SpringBoard/MCM the bundle ID and install type.
+        let metadataPlist: NSDictionary = [
+            "MCMMetadataIdentifier": bundleID,
+            "MCMMetadataContent": [
+                "CFBundleIdentifier": bundleID,
+                "MCMBundleType": "User"
+            ],
+            "MCMMetadataVersion": 1
+        ]
+        let metadataPath = (containerPath as NSString)
+            .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+        if !metadataPlist.write(toFile: metadataPath, atomically: true) {
+            logmsg("(mcm) ⚠️ couldn't write MCM metadata plist (non-fatal)")
+        }
+
+        // 3. Symlink the app bundle into the container
+        //    (copy as fallback if symlink is denied by MACF)
+        let appLinkPath = (containerPath as NSString).appendingPathComponent(appName)
+        do {
+            try fm.createSymbolicLink(atPath: appLinkPath, withDestinationPath: bundlePath)
+            logmsg("(mcm) ✅ created container symlink: \(appLinkPath) → \(bundlePath)")
+            return appLinkPath
+        } catch {
+            logmsg("(mcm) ⚠️ symlink failed (\(error)), trying hardlink...")
+        }
+
+        // 4. Hardlink fallback (works within same filesystem)
+        if link(bundlePath, appLinkPath) == 0 {
+            logmsg("(mcm) ✅ created container hardlink at \(appLinkPath)")
+            return appLinkPath
+        }
+
+        // 5. Copy fallback (expensive but always works)
+        do {
+            try fm.copyItem(atPath: bundlePath, toPath: appLinkPath)
+            logmsg("(mcm) ✅ copied app bundle to container at \(appLinkPath)")
+            return appLinkPath
+        } catch {
+            logmsg("(mcm) ❌ copy also failed: \(error)")
+            try? fm.removeItem(atPath: containerPath)
+            return nil
+        }
+    }
+
     /// Inject the app bundle URL directly into BackBoard's applicationState.db.
+
     /// This is the most reliable method on iOS 14+ rootless jailbreaks:
     /// SpringBoard reads this SQLite DB on launch to discover all user apps.
     /// The DB lives at /var/mobile/Library/BackBoard/applicationState.db.
@@ -1048,36 +1119,60 @@ final class laramgr: ObservableObject {
             }
         }
 
-        // ── Method 2: _LSRegisterURL as a C function via dlopen ──────────────
-        // This is EXACTLY what procursus uicache does on iOS 14+.
-        // _LSRegisterURL is a plain C function — NOT an ObjC selector — exported
-        // from MobileInstallation.framework. Must be called via dlopen/dlsym.
-        // Signature: int _LSRegisterURL(CFURLRef url, Boolean updateIfPresent)
-        logmsg("(uicache) trying _LSRegisterURL via dlopen...")
+        // ── Method 1b: MCM container creation ────────────────────────────────
+        // Create a container under /var/mobile/Containers/Bundle/Application/<UUID>/
+        // SpringBoard ALWAYS scans this directory — no LS registration needed.
+        // This is what Dopamine/palera1n bootstraps do for rootless app registration.
+        var effectiveBundlePath = bundlePath
+        if !bundleID.isEmpty,
+           let containerAppPath = createMCMContainerForApp(bundlePath: bundlePath, bundleID: bundleID) {
+            logmsg("(mcm) using container path for LS registration: \(containerAppPath)")
+            effectiveBundlePath = containerAppPath
+            // Don't return here — also register with LS using the container path for safety
+        }
 
-        // dlopen MobileInstallation and call _LSRegisterURL(url, updateIfPresent)
-        let miPath = "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
+        // ── Method 2: _LSRegisterURL as a C function via dlopen ──────────────
+        // Try RTLD_DEFAULT first (symbol may already be in dyld shared cache),
+        // then try framework paths.
+        logmsg("(uicache) trying _LSRegisterURL via dlopen...")
+        let cfURL = URL(fileURLWithPath: effectiveBundlePath, isDirectory: true) as CFURL
+        typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
         var registeredViaDlopen = false
-        if let miHandle = dlopen(miPath, RTLD_LAZY | RTLD_GLOBAL) {
-            if let sym = dlsym(miHandle, "_LSRegisterURL") {
-                let cfURL = URL(fileURLWithPath: bundlePath, isDirectory: true) as CFURL
-                typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
-                let fn = unsafeBitCast(sym, to: LSRegFn.self)
-                let rc = fn(cfURL, true)
-                logmsg("(uicache) _LSRegisterURL(dlopen) returned \(rc)")
-                registeredViaDlopen = rc == 0
-                if registeredViaDlopen {
-                    logmsg("(uicache) ✅ registered \(bundleID) via _LSRegisterURL (dlopen)")
-                } else {
-                    logmsg("(uicache) ⚠️ _LSRegisterURL failed rc=\(rc)")
-                }
+
+        func tryLSRegisterURL(_ sym: UnsafeMutableRawPointer) -> Bool {
+            let fn = unsafeBitCast(sym, to: LSRegFn.self)
+            let rc = fn(cfURL, true)
+            logmsg("(uicache) _LSRegisterURL returned \(rc)")
+            return rc == 0
+        }
+
+        // a) Already loaded in process (dyld shared cache)
+        if let sym = dlsym(RTLD_DEFAULT, "_LSRegisterURL") {
+            registeredViaDlopen = tryLSRegisterURL(sym)
+            if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via RTLD_DEFAULT") }
+        }
+
+        // b) MobileInstallation.framework
+        if !registeredViaDlopen {
+            let miPath = "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
+            if let h = dlopen(miPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
+                registeredViaDlopen = tryLSRegisterURL(sym)
+                if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via MobileInstallation") }
+                dlclose(h)
             } else {
-                logmsg("(uicache) ⚠️ _LSRegisterURL symbol not found in MobileInstallation")
+                logmsg("(uicache) ⚠️ _LSRegisterURL not found in MobileInstallation")
+                if let h = dlopen(nil, RTLD_LAZY) { dlclose(h) }  // clear dlerror
             }
-            dlclose(miHandle)
-        } else {
-            let err = dlerror().map { String(cString: $0) } ?? "unknown"
-            logmsg("(uicache) ⚠️ dlopen MobileInstallation failed: \(err)")
+        }
+
+        // c) CoreServices.framework (iOS 16+ moved some LS symbols here)
+        if !registeredViaDlopen {
+            let csPath = "/System/Library/Frameworks/CoreServices.framework/CoreServices"
+            if let h = dlopen(csPath, RTLD_LAZY | RTLD_GLOBAL), let sym = dlsym(h, "_LSRegisterURL") {
+                registeredViaDlopen = tryLSRegisterURL(sym)
+                if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via CoreServices") }
+                dlclose(h)
+            }
         }
 
         if registeredViaDlopen {
@@ -1087,7 +1182,7 @@ final class laramgr: ObservableObject {
         }
 
         // ── Method 3: LSApplicationWorkspace ObjC selectors ──────────────────
-        let appFileURL = URL(fileURLWithPath: bundlePath, isDirectory: true) as NSURL
+        let appFileURL = URL(fileURLWithPath: effectiveBundlePath, isDirectory: true) as NSURL
         if let lsClass = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type {
             let dwSel = NSSelectorFromString("defaultWorkspace")
             if lsClass.responds(to: dwSel),
