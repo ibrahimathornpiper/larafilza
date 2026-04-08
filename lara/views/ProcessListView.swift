@@ -173,7 +173,7 @@ struct ProcessListView: View {
                     }
                 }
                 procs.append(KernelProcess(
-                    pid: e.pid,
+                    pid: Int32(e.pid),
                     uid: e.uid,
                     gid: e.gid,
                     name: name,
