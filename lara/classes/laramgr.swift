@@ -1137,7 +1137,7 @@ final class laramgr: ObservableObject {
         typealias LSRegFn = @convention(c) (CFURL, Bool) -> Int32
 
         // a) Already loaded in process (dyld shared cache)
-        if let sym = dlsym(RTLD_DEFAULT, "_LSRegisterURL") {
+        if let sym = dlsym(nil, "_LSRegisterURL") {
             let fn = unsafeBitCast(sym, to: LSRegFn.self)
             registeredViaDlopen = fn(cfURL, true) == 0
             if registeredViaDlopen { logmsg("(uicache) ✅ _LSRegisterURL via RTLD_DEFAULT") }
