@@ -898,7 +898,8 @@ final class laramgr: ObservableObject {
     }
     
     func deployBootstrap(completion: @escaping (Bool) -> Void) {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let bsURL = URL(string: "https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.tar.zst")!
         let bsDest = docs.appendingPathComponent("bootstrap.tar.zst")
         let bsTar = docs.appendingPathComponent("bootstrap.tar")
