@@ -90,6 +90,18 @@ struct SettingsView: View {
                         }
                     
                     Toggle("Show File Manager in Tabs", isOn: $showfmintabs)
+                    
+                    Button {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            laramgr.shared.respring()
+                        }
+                    } label: {
+                        HStack {
+                            Text("Respring Device")
+                            Spacer()
+                            Image(systemName: "arrow.clockwise.circle")
+                        }
+                    }
                 } header: {
                     Text("Lara Settings")
                 } footer: {
