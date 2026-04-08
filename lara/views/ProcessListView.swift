@@ -162,7 +162,7 @@ struct ProcessListView: View {
                 }
                 return
             }
-            defer { proclist_free(entries) }
+            defer { free_proclist(entries) }
             
             var procs: [KernelProcess] = []
             for i in 0..<Int(count) {
@@ -177,9 +177,9 @@ struct ProcessListView: View {
                     uid: e.uid,
                     gid: e.gid,
                     name: name,
-                    procAddr: e.proc_addr,
-                    ucredAddr: e.ucred_addr,
-                    sandboxPtr: e.sandbox_ptr
+                    procAddr: e.kaddr,
+                    ucredAddr: 0,
+                    sandboxPtr: 0
                 ))
             }
             
