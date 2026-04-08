@@ -972,10 +972,30 @@ final class laramgr: ObservableObject {
                     // Use proper deb installer with dpkg registration
                     self.installDebToSystem(debURL: sileoDest) { installOK in
                         if installOK {
-                            self.logmsg("(jb) ✅ sileo installed!")
-                            
-                            // Register Sileo.app bundle path directly — no symlink needed
+                            // Verify Sileo actually exists at the expected path
                             let sileoBundlePath = (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app")
+                            let fm = FileManager.default
+                            if fm.fileExists(atPath: sileoBundlePath) {
+                                self.logmsg("(jb) ✅ sileo installed! (verified at \(sileoBundlePath))")
+                            } else {
+                                // Try alternate location - maybe it's in the wrong place
+                                let altPaths = [
+                                    (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app/Payload/Sileo.app"),
+                                    (Self.jbRoot as NSString).appendingPathComponent("Applications/org.coolstar.sileo.app"),
+                                    (Self.jbRoot as NSString).appendingPathComponent("Applications/Sileo.app/Sileo.app"),
+                                ]
+                                for altPath in altPaths {
+                                    if fm.fileExists(atPath: altPath) {
+                                        self.logmsg("(jb) ✅ sileo found at alternate path: \(altPath)")
+                                        break
+                                    }
+                                }
+                                // List what's in Applications
+                                let appsDir = (Self.jbRoot as NSString).appendingPathComponent("Applications")
+                                if let contents = try? fm.contentsOfDirectory(atPath: appsDir) {
+                                    self.logmsg("(jb) Applications contents: \(contents)")
+                                }
+                            }
                             
                             // Register Sileo with SpringBoard
                             self.registerAppWithSpringBoard(bundlePath: sileoBundlePath)
