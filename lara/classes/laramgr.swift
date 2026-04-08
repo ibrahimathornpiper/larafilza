@@ -493,8 +493,8 @@ final class laramgr: ObservableObject {
 
         var items: [(String, Bool)] = []
         for i in 0..<Int(count) {
-            let e = entries[i]
-            let name = withUnsafePointer(to: e.name) { p in
+            var e = entries[i]
+            let name = withUnsafePointer(to: &e.name) { p in
                 p.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
             }
             items.append((name, e.d_type == 4))
