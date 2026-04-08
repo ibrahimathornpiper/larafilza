@@ -943,7 +943,7 @@ final class laramgr: ObservableObject {
                         // Try creating symlink using posix_spawn
                         let lnPath = "/bin/ln"
                         if fm.fileExists(atPath: lnPath) {
-                            let ret = spawnBinary(lnPath, args: ["-s", targetDir, varjbLink])
+                            let ret = self.spawnBinary(lnPath, args: ["-s", targetDir, varjbLink])
                             if ret == 0 {
                                 self.logmsg("(jb) ✅ created /var/jb symlink")
                             } else {
@@ -956,7 +956,7 @@ final class laramgr: ObservableObject {
                     let prepScript = (targetDir as NSString).appendingPathComponent("prep_bootstrap.sh")
                     if fm.fileExists(atPath: prepScript) {
                         // Read and fix the script
-                        if var scriptContent = try? String(contentsOfFile: prepScript, encoding: .utf8) {
+                        if let scriptContent = try? String(contentsOfFile: prepScript, encoding: .utf8) {
                             // Replace /var/jb with targetDir
                             let fixedScript = scriptContent.replacingOccurrences(of: "/var/jb", with: targetDir)
                             try? fixedScript.write(toFile: prepScript, atomically: true, encoding: .utf8)
