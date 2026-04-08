@@ -935,16 +935,41 @@ final class laramgr: ObservableObject {
                 if extractOK {
                     self.logmsg("(jb) ✅ bootstrap extracted!")
                     
-                    // Run prep_bootstrap.sh if it exists
+                    // Create symlink: /var/jb -> targetDir so prep_bootstrap.sh paths work
+                    // Try to create /var/jb symlink - this may fail on iOS 18 but worth trying
+                    let varjbLink = "/var/jb"
+                    if !fm.fileExists(atPath: varjbLink) {
+                        // Try creating symlink using posix_spawn
+                        let lnPath = "/bin/ln"
+                        if fm.fileExists(atPath: lnPath) {
+                            let ret = spawnBinary(lnPath, args: ["-s", targetDir, varjbLink])
+                            if ret == 0 {
+                                self.logmsg("(jb) ✅ created /var/jb symlink")
+                            } else {
+                                self.logmsg("(jb) ⚠️ could not create /var/jb symlink (this is OK)")
+                            }
+                        }
+                    }
+                    
+                    // Fix prep_bootstrap.sh script to use actual paths instead of /var/jb
                     let prepScript = (targetDir as NSString).appendingPathComponent("prep_bootstrap.sh")
-                    let jbSh = (targetDir as NSString).appendingPathComponent("bin/sh")
-                    if FileManager.default.fileExists(atPath: prepScript) {
+                    if fm.fileExists(atPath: prepScript) {
+                        // Read and fix the script
+                        if var scriptContent = try? String(contentsOfFile: prepScript, encoding: .utf8) {
+                            // Replace /var/jb with targetDir
+                            let fixedScript = scriptContent.replacingOccurrences(of: "/var/jb", with: targetDir)
+                            try? fixedScript.write(toFile: prepScript, atomically: true, encoding: .utf8)
+                            self.logmsg("(jb) fixed prep_bootstrap.sh paths")
+                        }
+                        
                         // Make script executable
-                        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: prepScript)
-                        if FileManager.default.fileExists(atPath: jbSh) {
-                            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jbSh)
+                        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: prepScript)
+                        
+                        let jbSh = (targetDir as NSString).appendingPathComponent("bin/sh")
+                        if fm.fileExists(atPath: jbSh) {
+                            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jbSh)
                             self.logmsg("(jb) running prep_bootstrap.sh...")
-                            // Pass NO_PASSWORD_PROMPT=1 to skip uialert (can't show from background spawn)
+                            // Pass NO_PASSWORD_PROMPT=1 to skip uialert
                             // Pass PATH so procursus binaries are found
                             let cmd = "NO_PASSWORD_PROMPT=1 PATH=\(targetDir)/usr/bin:\(targetDir)/bin:/usr/bin:/bin \(prepScript)"
                             let ret = self.spawnBinary(jbSh, args: ["-c", cmd])
