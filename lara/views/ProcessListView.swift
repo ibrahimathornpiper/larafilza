@@ -156,7 +156,7 @@ struct ProcessListView: View {
         isLoading = true
         DispatchQueue.global(qos: .userInitiated).async {
             var count: Int32 = 0
-            guard let entries = proclist(&count) else {
+            guard let entries = proclist(nil, &count) else {
                 DispatchQueue.main.async {
                     self.isLoading = false
                 }
