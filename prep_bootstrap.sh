@@ -1,6 +1,7 @@
 #!/private/var/mobile/procursus/bin/sh
 
-/private/var/mobile/procursus/usr/libexec/firmware
+# Skip firmware on iOS 18+ as it's not needed and may fail
+# /private/var/mobile/procursus/usr/libexec/firmware
 /private/var/mobile/procursus/usr/sbin/pwd_mkdb -p /private/var/mobile/procursus/etc/master.passwd >/dev/null 2>&1
 /private/var/mobile/procursus/Library/dpkg/info/debianutils.postinst configure 99999
 /private/var/mobile/procursus/Library/dpkg/info/apt.postinst configure 999999
