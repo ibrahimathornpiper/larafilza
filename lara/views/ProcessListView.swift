@@ -167,8 +167,8 @@ struct ProcessListView: View {
             var procs: [KernelProcess] = []
             for i in 0..<Int(count) {
                 let e = entries[i]
-                let name = withUnsafePointer(to: e.name) { ptr in
-                    ptr.withMemoryRebound(to: CChar.self, capacity: 64) {
+                let name = withUnsafePointer(to: &e.name) { ptr in
+                    ptr.withMemoryRebound(to: CChar.self, capacity: 32) {
                         String(cString: $0)
                     }
                 }
